@@ -1,22 +1,24 @@
 @echo off
 :: Portable 1-click installer for this PC or any friend's PC:
 :: Stops running GoodbyeDPI before copying to C:\Tools\goodbyedpi-0.2.3rc3-2, creates 2 Desktop buttons, and starts GoodbyeDPI.
-net session >nul 2>&1 || (powershell -NoProfile -Command "if ('%~1') { Start-Process -FilePath '%~f0' -ArgumentList '%~1' -Verb RunAs } else { Start-Process -FilePath '%~f0' -Verb RunAs }" & exit /b)
+net session >nul 2>&1 || (set "GDPI_SELF=%~f0" & set "GDPI_ARG=%~1" & powershell -NoProfile -Command "if ($env:GDPI_ARG) { Start-Process -FilePath $env:GDPI_SELF -ArgumentList $env:GDPI_ARG -Verb RunAs } else { Start-Process -FilePath $env:GDPI_SELF -Verb RunAs }" & exit /b)
 
 set "SRC=%~dp0"
 if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
 set "DST=C:\Tools\goodbyedpi-0.2.3rc3-2"
 
-if /I not "%SRC%"=="%DST%" (
-    echo Dang sao chep bo cong cu vao %DST% ...
-    sc stop GoodbyeDPI >nul 2>&1
-    taskkill /F /IM goodbyedpi.exe >nul 2>&1
-    for /L %%i in (1,1,10) do (
-        sc query GoodbyeDPI | find "STOP_PENDING" >nul 2>&1 && ping 192.0.2.1 -n 1 -w 50 >nul 2>&1
-    )
-    if not exist "%DST%" mkdir "%DST%"
-    xcopy "%SRC%\*" "%DST%\" /E /I /C /R /Y >nul
+if /I "%SRC%"=="%DST%" goto :skip_copy
+echo Dang sao chep bo cong cu vao %DST% ...
+sc stop GoodbyeDPI >nul 2>&1
+taskkill /F /IM goodbyedpi.exe >nul 2>&1
+for /L %%i in (1,1,10) do (
+    sc query GoodbyeDPI | find "STOP_PENDING" >nul 2>&1 || goto :copy_ready
+    ping 192.0.2.1 -n 1 -w 50 >nul 2>&1
 )
+:copy_ready
+if not exist "%DST%" mkdir "%DST%"
+xcopy "%SRC%\*" "%DST%\" /E /I /C /R /Y >nul
+:skip_copy
 
 echo Dang tao 2 nut GoodbyeDPI BAT va GoodbyeDPI TAT tren Desktop...
 schtasks /create /tn "GoodbyeDPI-On" /tr "\"%DST%\goodbyedpi_on.cmd\"" /sc once /st 00:00 /sd 01/01/2000 /rl highest /it /f >nul

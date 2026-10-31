@@ -6,6 +6,18 @@ $baseDir = $PSScriptRoot
 $inv = [System.Globalization.CultureInfo]::InvariantCulture
 $curlExe = if ([System.IO.File]::Exists("$env:SystemRoot\System32\curl.exe")) { "$env:SystemRoot\System32\curl.exe" } else { "curl.exe" }
 
+function Get-HklmValue {
+    param(
+        [string]$SubKey,
+        [string]$ValueName
+    )
+    $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($SubKey, $false)
+    if ($null -ne $k) {
+        try { return $k.GetValue($ValueName, $null) } finally { $k.Dispose() }
+    }
+    return $null
+}
+
 function Start-CurlProbe {
     param([string]$Arguments)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -16,6 +28,11 @@ function Start-CurlProbe {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     return [System.Diagnostics.Process]::Start($psi)
+}
+
+function Start-SteamParallelProbe {
+    $steamArgs = "-Z -s --connect-timeout 2 --max-time 3.5 -o NUL -w `"0|%{http_code}|%{remote_ip}|%{time_total}`n`" `"https://store.steampowered.com/`" --next -s --connect-timeout 2 --max-time 3.5 -o NUL -w `"1|%{http_code}|%{remote_ip}|%{time_total}`n`" `"https://steamcommunity.com/`" --next -s --connect-timeout 2 --max-time 3.5 -o NUL -w `"2|%{http_code}|%{remote_ip}|%{time_total}`n`" `"https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/`""
+    return (Start-CurlProbe -Arguments $steamArgs)
 }
 
 function Start-CdnRaceProbes {
@@ -33,10 +50,15 @@ function Start-CdnRaceProbes {
 }
 
 function Wait-CdnRaceProbes {
-    param([object[]]$Probes)
+    param(
+        [object[]]$Probes,
+        [string]$PinnedIp
+    )
     $bestIp = $null
     $bestTime = 999.0
     $bestHttp = "000"
+    $pinnedIpTime = 999.0
+    $pinnedIpHttp = "000"
     $aliveIp = $null
     $raceSw = [System.Diagnostics.Stopwatch]::StartNew()
     $winnerFoundAt = 0L
@@ -59,12 +81,18 @@ function Wait-CdnRaceProbes {
                             $t = 999.0
                             $tOk = [double]::TryParse(($parts[2] -replace ',', '.'), [System.Globalization.NumberStyles]::Float, $inv, [ref]$t)
                             $validPayload = ($parts[0] -eq "206" -and $dlSize -ge 500000) -or ($parts[0] -eq "200" -and $dlSize -ge 50000)
-                            if ($tOk -and $validPayload -and $t -gt 0.0 -and $t -lt $bestTime) {
-                                $bestTime = $t
-                                $bestIp = $p.IP
-                                $bestHttp = $parts[0]
-                                if ($winnerFoundAt -eq 0L) {
-                                    $winnerFoundAt = $raceSw.ElapsedMilliseconds
+                            if ($tOk -and $validPayload -and $t -gt 0.0) {
+                                if ($PinnedIp -and $p.IP -eq $PinnedIp) {
+                                    $pinnedIpTime = $t
+                                    $pinnedIpHttp = $parts[0]
+                                }
+                                if ($t -lt $bestTime) {
+                                    $bestTime = $t
+                                    $bestIp = $p.IP
+                                    $bestHttp = $parts[0]
+                                    if ($winnerFoundAt -eq 0L) {
+                                        $winnerFoundAt = $raceSw.ElapsedMilliseconds
+                                    }
                                 }
                             }
                         }
@@ -90,10 +118,12 @@ function Wait-CdnRaceProbes {
     }
 
     return [PSCustomObject]@{
-        BestIp  = $bestIp
-        BestTime = $bestTime
-        BestHttp = $bestHttp
-        AliveIp  = $aliveIp
+        BestIp       = $bestIp
+        BestTime     = $bestTime
+        BestHttp     = $bestHttp
+        PinnedIpTime = $pinnedIpTime
+        PinnedIpHttp = $pinnedIpHttp
+        AliveIp      = $aliveIp
     }
 }
 
@@ -136,8 +166,7 @@ try {
         $hasMutex = $true
     }
 
-    # 1. Read hosts file safely and launch CDN race probes BEFORE netsh DNS configuration
-    # (--resolve connects directly by IP so CDN downloads run in parallel with netsh)
+    # 1. Read hosts file safely and launch batched Steam -Z probe + 7 CDN race probes immediately
     $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
     $hostsData = Read-HostsSafely -Path $hostsPath
     $currentPinnedIp = $null
@@ -168,12 +197,11 @@ try {
     ) | Select-Object -Unique | Select-Object -First 7
 
     $mainJsPath = "/app/pc-2610-202/main.cb4691e73a746a46.js"
-    $seedIp = $candidateIps[0]
 
+    $steamProbe = Start-SteamParallelProbe
     $cdnProbes = @(Start-CdnRaceProbes -CandidateIps $candidateIps -MainJsPath $mainJsPath)
-    $indexProbe = Start-CurlProbe -Arguments "-s -k --connect-timeout 1 --max-time 2 --resolve `"prod-live-front.playbattlegrounds.com:443:$seedIp`" `"https://prod-live-front.playbattlegrounds.com/index.html`""
 
-    # 2. Fast-path DNS + Native Windows 11 DoH on active physical network adapters (8.8.8.8 / 8.8.4.4, no dead ::1)
+    # 2. Fast-path DNS + Native Windows 11 DoH on active physical network adapters (.NET Registry fast path)
     $nics = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
         $_.OperationalStatus -eq 'Up' -and
         $_.NetworkInterfaceType -ne 'Loopback' -and
@@ -187,20 +215,20 @@ try {
     foreach ($nic in $nics) {
         $name = $nic.Name
         $guid = $nic.Id
-        $v4RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
-        $v6RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$guid"
-        $v4Servers = (Get-ItemProperty -Path $v4RegPath -Name NameServer -ErrorAction SilentlyContinue).NameServer
-        $v6Servers = (Get-ItemProperty -Path $v6RegPath -Name NameServer -ErrorAction SilentlyContinue).NameServer
+        $v4SubKey = "SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$guid"
+        $v6SubKey = "SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$guid"
+        $v4Servers = Get-HklmValue -SubKey $v4SubKey -ValueName "NameServer"
+        $v6Servers = Get-HklmValue -SubKey $v6SubKey -ValueName "NameServer"
 
-        $dohBase = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh"
-        $doh8888 = (Get-ItemProperty -Path "$dohBase\8.8.8.8" -Name DohFlags -ErrorAction SilentlyContinue).DohFlags
-        $doh8844 = (Get-ItemProperty -Path "$dohBase\8.8.4.4" -Name DohFlags -ErrorAction SilentlyContinue).DohFlags
+        $dohSubBase = "SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh"
+        $doh8888 = Get-HklmValue -SubKey "$dohSubBase\8.8.8.8" -ValueName "DohFlags"
+        $doh8844 = Get-HklmValue -SubKey "$dohSubBase\8.8.4.4" -ValueName "DohFlags"
 
         if ($v4Servers -ne '8.8.8.8,8.8.4.4' -or $v6Servers -match '::1' -or $doh8888 -ne 1 -or $doh8844 -ne 1) {
             if (-not $dohServerConfigured) {
-                $wkBase = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers"
-                $wk8888 = (Get-ItemProperty -Path "$wkBase\8.8.8.8" -Name Flags -ErrorAction SilentlyContinue).Flags
-                $wk8844 = (Get-ItemProperty -Path "$wkBase\8.8.4.4" -Name Flags -ErrorAction SilentlyContinue).Flags
+                $wkSubBase = "SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohWellKnownServers"
+                $wk8888 = Get-HklmValue -SubKey "$wkSubBase\8.8.8.8" -ValueName "Flags"
+                $wk8844 = Get-HklmValue -SubKey "$wkSubBase\8.8.4.4" -ValueName "Flags"
                 if ($wk8888 -ne 12 -or $wk8844 -ne 12) {
                     foreach ($dohServer in @('8.8.8.8', '8.8.4.4', '2001:4860:4860::8888', '2001:4860:4860::8844')) {
                         Set-DnsClientDohServerAddress -ServerAddress $dohServer -AutoUpgrade $true -AllowFallbackToUdp $true | Out-Null
@@ -214,6 +242,7 @@ try {
             & netsh.exe interface ipv6 set dnsservers name="$name" dhcp | Out-Null
 
             if ($guid) {
+                $dohBase = "HKLM:\$dohSubBase"
                 foreach ($staleIp in @('1.1.1.1', '1.0.0.1', '::1')) {
                     if (Test-Path "$dohBase\$staleIp") {
                         Remove-Item -Path "$dohBase\$staleIp" -Recurse -Force -ErrorAction SilentlyContinue
@@ -231,23 +260,26 @@ try {
 
     if ($dnsChanged) {
         & ipconfig.exe /flushdns | Out-Null
-    }
-
-    # 3. Launch parallel Steam verification probes after clean ECS DNS is active
-    $verifyTargets = @(
-        [PSCustomObject]@{ Label = "Steam Store      (store.steampowered)"; Url = "https://store.steampowered.com/" },
-        [PSCustomObject]@{ Label = "Steam Community  (steamcommunity.com)"; Url = "https://steamcommunity.com/" },
-        [PSCustomObject]@{ Label = "Steam Web API    (api.steampowered)  "; Url = "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/" }
-    )
-    $verifyProbes = foreach ($vt in $verifyTargets) {
-        [PSCustomObject]@{
-            Label = $vt.Label
-            Process = Start-CurlProbe -Arguments "-s -o NUL -w `"%{http_code}|%{remote_ip}|%{time_total}`" --connect-timeout 2 --max-time 3.5 `"$($vt.Url)`""
+        if ($steamProbe) {
+            if (-not $steamProbe.HasExited) { try { $steamProbe.Kill() } catch {} }
+            try { $steamProbe.Dispose() } catch {}
         }
+        $steamProbe = Start-SteamParallelProbe
     }
 
-    # 4. Run local disk/registry checks while network probes are in flight
-    # 4a. Surgical Coherent GT Cache (CohCache) Integrity Validator & Auto-Repair (.NET fast path)
+    # 3. Run local maintenance while network probes are in flight
+    # 3a. Close any previous orphaned elevated cmd.exe status windows
+    try {
+        $cmdProcs = @(([wmisearcher]"SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process WHERE Name='cmd.exe' OR ProcessId=$PID").Get())
+        $myParentPid = ($cmdProcs | Where-Object { $_.ProcessId -eq $PID } | Select-Object -First 1).ParentProcessId
+        foreach ($cp in $cmdProcs) {
+            if ($cp.ProcessId -ne $PID -and $cp.ProcessId -ne $myParentPid -and $cp.CommandLine -match 'goodbyedpi_(on|off)\.cmd') {
+                Stop-Process -Id $cp.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+
+    # 3b. Surgical Coherent GT Cache (CohCache) Integrity Validator & Auto-Repair (.NET fast path)
     $cohCacheDir = Join-Path $env:LOCALAPPDATA "TslGame\Saved\CohCache"
     if ([System.IO.Directory]::Exists($cohCacheDir)) {
         $repairedCount = 0
@@ -300,7 +332,7 @@ try {
         }
     }
 
-    # 4b. Fast-path Scheduled Task maintenance (only invoke Set-ScheduledTask when needed)
+    # 3c. Fast-path Scheduled Task maintenance (only invoke Set-ScheduledTask when needed)
     $tasksDir = "$env:SystemRoot\System32\Tasks"
     if ([System.IO.File]::Exists("$tasksDir\GoodbyeDPI-Toggle")) {
         Unregister-ScheduledTask -TaskName 'GoodbyeDPI-Toggle' -Confirm:$false | Out-Null
@@ -313,36 +345,16 @@ try {
                 $taskXml -notmatch '<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>' -or
                 $taskXml -notmatch '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>' -or
                 $taskXml -notmatch '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>') {
-                $tObj = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-                if ($tObj -and $tObj.Actions[0].Arguments -notmatch '--nopause') {
-                    $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel
-                    Set-ScheduledTask -TaskName $taskName -Settings $s | Out-Null
-                }
+                $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel
+                Set-ScheduledTask -TaskName $taskName -Settings $s | Out-Null
             }
         }
     }
 
-    # 5. Collect parallel 512 KB CDN benchmark results (with resilient fallback on game update)
-    $raceResult = Wait-CdnRaceProbes -Probes $cdnProbes
+    # 4. Collect parallel 512 KB CDN benchmark results (with Wave 2 fallback only when Wave 1 fails)
+    $raceResult = Wait-CdnRaceProbes -Probes $cdnProbes -PinnedIp $currentPinnedIp
 
-    if ($raceResult.BestIp) {
-        if ($indexProbe) {
-            if (-not $indexProbe.HasExited) {
-                try { $indexProbe.Kill() } catch {}
-            }
-            try { $indexProbe.Dispose() } catch {}
-        }
-    } else {
-        $rootHtml = ""
-        if ($indexProbe) {
-            try {
-                $rootHtml = ($indexProbe.StandardOutput.ReadToEnd()) -join "`n"
-                $indexProbe.WaitForExit(500) | Out-Null
-            } catch {}
-            if (-not $indexProbe.HasExited) { try { $indexProbe.Kill() } catch {} }
-            try { $indexProbe.Dispose() } catch {}
-        }
-
+    if (-not $raceResult.BestIp) {
         $discoveryIps = @(
             if ($raceResult.AliveIp) { $raceResult.AliveIp }
             $candidateIps
@@ -350,11 +362,7 @@ try {
 
         $discoveredPath = $null
         foreach ($dIp in $discoveryIps) {
-            $htmlToCheck = if ($dIp -eq $seedIp -and $rootHtml) {
-                $rootHtml
-            } else {
-                (& $curlExe -s -k --connect-timeout 1 --max-time 2 --resolve "prod-live-front.playbattlegrounds.com:443:$dIp" "https://prod-live-front.playbattlegrounds.com/index.html") -join "`n"
-            }
+            $htmlToCheck = (& $curlExe -s -k --connect-timeout 1 --max-time 2 --resolve "prod-live-front.playbattlegrounds.com:443:$dIp" "https://prod-live-front.playbattlegrounds.com/index.html") -join "`n"
             if (($htmlToCheck -join "`n") -match '(/app/[^"'']+/index\.html)') {
                 $appIndexPath = $Matches[1]
                 $appDir = $appIndexPath -replace '/index\.html$', ''
@@ -379,7 +387,7 @@ try {
                 }
             } catch {}
             $retryProbes = @(Start-CdnRaceProbes -CandidateIps $candidateIps -MainJsPath $mainJsPath)
-            $raceResult = Wait-CdnRaceProbes -Probes $retryProbes
+            $raceResult = Wait-CdnRaceProbes -Probes $retryProbes -PinnedIp $currentPinnedIp
         }
     }
 
@@ -387,7 +395,16 @@ try {
     $bestTime = $raceResult.BestTime
     $bestHttp = $raceResult.BestHttp
 
-    # 6. Atomically update C:\Windows\System32\drivers\etc\hosts (or unpin dead IPs if all probes failed)
+    # Apply 40 ms hysteresis band so currentPinnedIp is kept when within 40 ms of the winner
+    if ($bestIp -and $currentPinnedIp -and $pinnedLineCount -eq 1 -and $raceResult.PinnedIpTime -lt 999.0) {
+        if (($raceResult.PinnedIpTime - $bestTime) -le 0.040) {
+            $bestIp = $currentPinnedIp
+            $bestTime = $raceResult.PinnedIpTime
+            $bestHttp = $raceResult.PinnedIpHttp
+        }
+    }
+
+    # 5. Atomically update C:\Windows\System32\drivers\etc\hosts (or unpin dead IPs if all probes failed)
     if ($hostsData.Success) {
         if ($bestIp) {
             if ($bestIp -ne $currentPinnedIp -or $pinnedLineCount -ne 1) {
@@ -405,24 +422,36 @@ try {
         }
     }
 
-    # 7. Collect and display parallel endpoint verification results
+    # 6. Collect and display batched parallel endpoint verification results
     Write-Host ""
     Write-Host "[3/3] Ket qua verify ket noi song song den Steam va PUBG:"
-    foreach ($vp in $verifyProbes) {
-        $vOut = ""
-        if ($vp.Process) {
-            try {
-                $vOut = $vp.Process.StandardOutput.ReadToEnd().Trim()
-                $vp.Process.WaitForExit()
-            } catch {}
-            try { $vp.Process.Dispose() } catch {}
+    $steamLabels = @(
+        "Steam Store      (store.steampowered)",
+        "Steam Community  (steamcommunity.com)",
+        "Steam Web API    (api.steampowered)  "
+    )
+    $steamResults = @{}
+    if ($steamProbe) {
+        $sOut = ""
+        try {
+            $sOut = $steamProbe.StandardOutput.ReadToEnd().Trim()
+            $steamProbe.WaitForExit()
+        } catch {}
+        try { $steamProbe.Dispose() } catch {}
+        foreach ($sLine in ($sOut -split "`r?`n")) {
+            $sParts = $sLine.Trim() -split '\|'
+            if ($sParts.Count -eq 4 -and $sParts[0] -match '^[012]$') {
+                $steamResults[[int]$sParts[0]] = $sParts
+            }
         }
-        $vParts = $vOut -split '\|'
-        if ($vParts.Count -eq 3) {
+    }
+    for ($idx = 0; $idx -lt 3; $idx++) {
+        if ($steamResults.ContainsKey($idx)) {
+            $sp = $steamResults[$idx]
             $vtSec = 0.0
-            [void][double]::TryParse(($vParts[2] -replace ',', '.'), [System.Globalization.NumberStyles]::Float, $inv, [ref]$vtSec)
+            [void][double]::TryParse(($sp[3] -replace ',', '.'), [System.Globalization.NumberStyles]::Float, $inv, [ref]$vtSec)
             $vtStr = $vtSec.ToString("F3", $inv)
-            Write-Host ("  - {0} : HTTP {1} | IP: {2,-15} | Time: {3}s" -f $vp.Label, $vParts[0], $vParts[1], $vtStr)
+            Write-Host ("  - {0} : HTTP {1} | IP: {2,-15} | Time: {3}s" -f $steamLabels[$idx], $sp[1], $sp[2], $vtStr)
         }
     }
     if ($bestIp) {
