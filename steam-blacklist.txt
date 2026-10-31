@@ -5,8 +5,11 @@ steamcontent.com
 steamuserdata.com
 steamserver.net
 steam-chat.com
+steamchat.com
 steamdeck.com
 steamgames.com
+valvesoftware.com
+akamaihd.net
 underlords.com
 dota2.com
 csgo.com
