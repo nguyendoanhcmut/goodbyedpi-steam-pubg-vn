@@ -14,7 +14,7 @@ echo [1/3] Dang kiem tra/khoi dong dich vu ngam GoodbyeDPI (2-byte native-frag +
 set "SVC_OK=0"
 sc query GoodbyeDPI | find "RUNNING" >nul 2>&1 && (
     sc qc GoodbyeDPI | find "--native-frag --allow-no-sni --max-payload 1200" >nul 2>&1 && (
-        sc qc GoodbyeDPI | find "AUTO_START" >nul 2>&1 && (
+        sc qc GoodbyeDPI | find "DEMAND_START" >nul 2>&1 && (
             set "SVC_OK=1"
             goto :svc_ready
         )
@@ -29,8 +29,8 @@ for /L %%i in (1,1,10) do (
 )
 :stop_done
 
-sc config GoodbyeDPI binPath= "\"!BASEDIR!\x86_64\goodbyedpi.exe\" -p -r -s -f 2 -k 2 -n -e 2 --native-frag --allow-no-sni --max-payload 1200 --blacklist \"!BLACKLIST!\" --dns-addr 208.67.222.222 --dns-port 5353 --dnsv6-addr 2620:119:35::35 --dnsv6-port 5353" start= auto >nul 2>&1 || (
-    sc create GoodbyeDPI binPath= "\"!BASEDIR!\x86_64\goodbyedpi.exe\" -p -r -s -f 2 -k 2 -n -e 2 --native-frag --allow-no-sni --max-payload 1200 --blacklist \"!BLACKLIST!\" --dns-addr 208.67.222.222 --dns-port 5353 --dnsv6-addr 2620:119:35::35 --dnsv6-port 5353" start= auto >nul 2>&1
+sc config GoodbyeDPI binPath= "\"!BASEDIR!\x86_64\goodbyedpi.exe\" -p -r -s -f 2 -k 2 -n -e 2 --native-frag --allow-no-sni --max-payload 1200 --blacklist \"!BLACKLIST!\" --dns-addr 208.67.222.222 --dns-port 5353 --dnsv6-addr 2620:119:35::35 --dnsv6-port 5353" start= demand >nul 2>&1 || (
+    sc create GoodbyeDPI binPath= "\"!BASEDIR!\x86_64\goodbyedpi.exe\" -p -r -s -f 2 -k 2 -n -e 2 --native-frag --allow-no-sni --max-payload 1200 --blacklist \"!BLACKLIST!\" --dns-addr 208.67.222.222 --dns-port 5353 --dnsv6-addr 2620:119:35::35 --dnsv6-port 5353" start= demand >nul 2>&1
 )
 sc start GoodbyeDPI >nul 2>&1
 for /L %%i in (1,1,10) do (
