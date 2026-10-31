@@ -29,14 +29,24 @@ Bộ công cụ vượt chặn **Steam** và sửa lỗi treo **`INITIALIZING...
 
 ## Hướng dẫn sử dụng
 
-### Cách 1 (Cài đặt mới hoặc gửi cho bạn bè)
+### Cách 1 (Nhanh nhất - Bấm `Windows + R`, dán 1 dòng lệnh là tự cài và bật luôn)
+1. Nhấn tổ hợp phím **`Windows + R`** trên bàn phím để mở hộp thoại **Run**.
+2. Dán dòng lệnh dưới đây vào và nhấn **Enter** (sau đó bấm **Yes** khi Windows hỏi quyền Admin).
+
+```text
+powershell -c "irm https://github.com/nguyendoanhcmut/goodbyedpi-steam-pubg-vn/raw/main/install.ps1|iex"
+```
+
+*(Hoặc nếu đang mở sẵn cửa sổ **PowerShell**, chỉ cần dán `irm https://github.com/nguyendoanhcmut/goodbyedpi-steam-pubg-vn/raw/main/install.ps1 | iex` rồi nhấn **Enter**).*
+
+### Cách 2 (Tải file `.zip` thủ công)
 1. Tải bản đóng gói `.zip` trong mục **Releases** (hoặc clone repo này về máy) và giải nén ra thư mục bất kỳ.
 2. Nhấp chuột phải vào **`CAI_DAT_1_CLICK.cmd`** và chọn **Run as administrator** (Chạy với quyền quản trị).
 3. Trên Desktop sẽ xuất hiện 2 nút bấm.
    - **`GoodbyeDPI BAT`** dùng để bật dịch vụ ngầm, cấu hình DNS/DoH, đua tốc độ song song CDN sảnh PUBG và in bảng kiểm tra kết nối (`HTTP 200`/`206`).
    - **`GoodbyeDPI TAT`** dùng để dừng dịch vụ ngầm (không tự bật lại khi khởi động máy), trả DNS về DHCP cho cả IPv4/IPv6 (kể cả trên các card mạng vừa rút dây), dọn khóa Registry DoH và gỡ dòng ghim trong `hosts`.
 
-### Cách 2 (Gỡ cài đặt)
+### Cách 3 (Gỡ cài đặt)
 - Nhấp chuột phải vào **`service_remove.cmd`** và chọn **Run as administrator** để xóa dịch vụ `GoodbyeDPI`, driver `WinDivert`, tác vụ tự động, 2 nút ngoài Desktop, khôi phục DNS DHCP và trả lại file `hosts` nguyên bản.
 
 ---
