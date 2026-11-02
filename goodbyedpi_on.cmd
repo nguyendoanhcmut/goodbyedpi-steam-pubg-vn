@@ -44,20 +44,5 @@ for /L %%i in (1,1,10) do (
 :svc_ready
 
 echo [2/3] Dang toi uu Google DNS (8.8.8.8/8.8.4.4 ECS + DoH), kiem tra CohCache va dua toc do CDN PUBG song song...
-powershell -NoProfile -ExecutionPolicy Bypass -File "!BASEDIR!\pubg_autofix.ps1"
-
-echo.
-if "!SVC_OK!"=="1" (
-    echo =========================================================================
-    echo  TRANG THAI: GoodbyeDPI DANG CHAY NGAM ON DINH ^(Windows Service^)
-    echo  Luu y: GoodbyeDPI chay ngam trong Windows Services, KHONG tat khi
-    echo  ban dong cua so nay. Muon tat han hay dung nut "GoodbyeDPI TAT".
-    echo =========================================================================
-) else (
-    echo LOI: GoodbyeDPI khong bat duoc. Chay CAI_DAT_1_CLICK.cmd de sua.
-)
-echo.
-if /I "%~1"=="--nopause" exit /b 0
-echo Cua so nay duoc giu nguyen de ban kiem tra. Bam phim bat ky khi muon dong...
-pause >nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "!BASEDIR!\pubg_autofix.ps1" %~1
 exit /b 0

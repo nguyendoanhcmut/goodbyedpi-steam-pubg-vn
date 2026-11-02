@@ -150,6 +150,8 @@ function Write-HostsSafely {
         try {
             [System.IO.File]::WriteAllLines($Path, [string[]]@($Lines), $utf8NoBom)
             return $true
+        } catch [System.UnauthorizedAccessException] {
+            return $false
         } catch {
             Start-Sleep -Milliseconds 40
         }
@@ -466,3 +468,17 @@ try {
     }
     try { $mutex.Dispose() } catch {}
 }
+
+# 7. Display status banner OUTSIDE the mutex and exit cleanly
+Write-Host ""
+if ($env:SVC_OK -eq "0") {
+    Write-Host "LOI: GoodbyeDPI khong bat duoc. Chay CAI_DAT_1_CLICK.cmd de sua."
+} else {
+    Write-Host "========================================================================="
+    Write-Host " TRANG THAI: GoodbyeDPI DANG CHAY NGAM ON DINH (Windows Service)"
+    Write-Host " Luu y: GoodbyeDPI chay ngam trong Windows Services, KHONG tat khi"
+    Write-Host " ban dong cua so nay. Muon tat han hay dung nut `"GoodbyeDPI TAT`"."
+    Write-Host "========================================================================="
+}
+Write-Host ""
+exit 0
