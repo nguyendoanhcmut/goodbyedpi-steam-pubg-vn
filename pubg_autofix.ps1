@@ -1,6 +1,3 @@
-# Auto-configure active network adapters DNS (ECS-preserving Google DNS 8.8.8.8/8.8.4.4 + Win11 DoH),
-# validate Coherent GT cache, race multi-region PUBG CDN IPs in parallel using 512 KB chunks,
-# and verify Steam + PUBG endpoints in parallel.
 $ErrorActionPreference = 'SilentlyContinue'
 $baseDir = $PSScriptRoot
 $inv = [System.Globalization.CultureInfo]::InvariantCulture
@@ -16,6 +13,17 @@ function Get-HklmValue {
         try { return $k.GetValue($ValueName, $null) } finally { $k.Dispose() }
     }
     return $null
+}
+
+function Get-UrlMd5Hex {
+    param([string]$Url)
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Url)
+        return ([System.BitConverter]::ToString($md5.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
+    } finally {
+        $md5.Dispose()
+    }
 }
 
 function Start-CurlProbe {
@@ -35,6 +43,108 @@ function Start-SteamParallelProbe {
     return (Start-CurlProbe -Arguments $steamArgs)
 }
 
+function Resolve-LivePubgBundle {
+    param(
+        [string[]]$ProbeIps,
+        [string]$CohCacheDir,
+        [string]$FallbackMainJsPath
+    )
+    $discoveredMainJs = $null
+    $discoveredAppDir = $null
+    $discoveredAssets = @()
+    $aliveIp = $null
+
+    $topIps = @($ProbeIps | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 4)
+    $idxProbes = @()
+    foreach ($ip in $topIps) {
+        $idxProbes += [PSCustomObject]@{
+            IP      = $ip
+            Process = Start-CurlProbe -Arguments "-s -k --connect-timeout 1 --max-time 2.0 --resolve `"prod-live-front.playbattlegrounds.com:443:$ip`" `"https://prod-live-front.playbattlegrounds.com/index.html`""
+            Done    = $false
+        }
+    }
+
+    $appIndexPath = $null
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt 2100 -and -not $appIndexPath) {
+        $allDone = $true
+        foreach ($p in $idxProbes) {
+            if (-not $p.Done) {
+                if ($p.Process.HasExited) {
+                    $p.Done = $true
+                    $html = $p.Process.StandardOutput.ReadToEnd()
+                    if ($html -notmatch 'playbattlegrounds\.com\.cn' -and $html -match '(/app/pc-[^"''?\s]+/index\.html)') {
+                        $appIndexPath = $Matches[1]
+                        $aliveIp = $p.IP
+                        break
+                    }
+                } else {
+                    $allDone = $false
+                }
+            }
+        }
+        if ($allDone -or $appIndexPath) { break }
+        Start-Sleep -Milliseconds 15
+    }
+    foreach ($p in $idxProbes) {
+        if ($p.Process) {
+            if (-not $p.Process.HasExited) { try { $p.Process.Kill() } catch {} }
+            try { $p.Process.Dispose() } catch {}
+        }
+    }
+
+    if ($appIndexPath -and $aliveIp) {
+        $discoveredAppDir = $appIndexPath -replace '/index\.html$', ''
+        $fbMatchesDir = $FallbackMainJsPath.StartsWith("$discoveredAppDir/")
+        $fbHash = Get-UrlMd5Hex -Url "https://prod-live-front.playbattlegrounds.com$FallbackMainJsPath"
+        $fbCached = $CohCacheDir -and [System.IO.File]::Exists((Join-Path $CohCacheDir "$fbHash.hdr"))
+        if ($fbMatchesDir -and $fbCached) {
+            $discoveredMainJs = $FallbackMainJsPath
+            $discoveredAssets = @($FallbackMainJsPath)
+        } else {
+            $appHtmlProc = Start-CurlProbe -Arguments "-s -k --connect-timeout 1 --max-time 2.0 --resolve `"prod-live-front.playbattlegrounds.com:443:$aliveIp`" `"https://prod-live-front.playbattlegrounds.com$appIndexPath`""
+            if ($appHtmlProc) {
+                try {
+                    $appHtml = $appHtmlProc.StandardOutput.ReadToEnd()
+                    $appHtmlProc.WaitForExit(2100) | Out-Null
+                    if ($appHtml -match '(/app/[^"'']+/js/main\.[^"'']+\.js)') {
+                        $discoveredMainJs = $Matches[1]
+                    } elseif ($appHtml -match '((?:js/)?main\.[a-f0-9]+\.js)') {
+                        $discoveredMainJs = "$discoveredAppDir/$($Matches[1])"
+                    }
+                    foreach ($assetMatch in [regex]::Matches($appHtml, '(?:href|src)="([^"]+)"')) {
+                        $rel = $assetMatch.Groups[1].Value -replace '^\./', ''
+                        if ($rel -and $rel -notmatch '^https?://' -and $rel -match '\.(js|css)$') {
+                            $fullAssetPath = if ($rel.StartsWith('/')) { $rel } else { "$discoveredAppDir/$rel" }
+                            if ($discoveredAssets -notcontains $fullAssetPath) {
+                                $discoveredAssets += $fullAssetPath
+                            }
+                        }
+                    }
+                } catch {}
+                try { $appHtmlProc.Dispose() } catch {}
+            }
+        }
+    }
+
+    if (-not $discoveredMainJs) {
+        $discoveredMainJs = $FallbackMainJsPath
+    }
+    if (-not $discoveredAppDir -and $discoveredMainJs -match '^(/app/[^/]+)/') {
+        $discoveredAppDir = $Matches[1]
+    }
+    if ($discoveredAssets.Count -eq 0 -and $discoveredMainJs) {
+        $discoveredAssets = @($discoveredMainJs)
+    }
+
+    return [PSCustomObject]@{
+        MainJsPath = $discoveredMainJs
+        AppDir     = $discoveredAppDir
+        Assets     = $discoveredAssets
+        AliveIp    = $aliveIp
+    }
+}
+
 function Start-CdnRaceProbes {
     param(
         [string[]]$CandidateIps,
@@ -42,9 +152,9 @@ function Start-CdnRaceProbes {
     )
     foreach ($ip in $CandidateIps) {
         [PSCustomObject]@{
-            IP = $ip
-            Process = Start-CurlProbe -Arguments "-s -k -o NUL -r 0-524287 -w `"%{http_code}|%{size_download}|%{time_total}`" --connect-timeout 1 --max-time 2 --resolve `"prod-live-front.playbattlegrounds.com:443:$ip`" `"https://prod-live-front.playbattlegrounds.com$MainJsPath`""
-            Done = $false
+            IP      = $ip
+            Process = Start-CurlProbe -Arguments "-s -k -o NUL -r 0-2097151 -w `"%{http_code}|%{size_download}|%{time_total}`" --connect-timeout 1.5 --max-time 5 --resolve `"prod-live-front.playbattlegrounds.com:443:$ip`" `"https://prod-live-front.playbattlegrounds.com$MainJsPath`""
+            Done    = $false
         }
     }
 }
@@ -63,7 +173,7 @@ function Wait-CdnRaceProbes {
     $raceSw = [System.Diagnostics.Stopwatch]::StartNew()
     $winnerFoundAt = 0L
 
-    while ($raceSw.ElapsedMilliseconds -lt 2100) {
+    while ($raceSw.ElapsedMilliseconds -lt 5100) {
         $allDone = $true
         foreach ($p in $Probes) {
             if (-not $p.Done) {
@@ -80,7 +190,7 @@ function Wait-CdnRaceProbes {
                             [long]::TryParse($parts[1], [ref]$dlSize) | Out-Null
                             $t = 999.0
                             $tOk = [double]::TryParse(($parts[2] -replace ',', '.'), [System.Globalization.NumberStyles]::Float, $inv, [ref]$t)
-                            $validPayload = ($parts[0] -eq "206" -and $dlSize -ge 500000) -or ($parts[0] -eq "200" -and $dlSize -ge 50000)
+                            $validPayload = ($parts[0] -eq "206" -and $dlSize -ge 1500000) -or ($parts[0] -eq "200" -and $dlSize -ge 1500000)
                             if ($tOk -and $validPayload -and $t -gt 0.0) {
                                 if ($PinnedIp -and $p.IP -eq $PinnedIp) {
                                     $pinnedIpTime = $t
@@ -102,7 +212,7 @@ function Wait-CdnRaceProbes {
                 }
             }
         }
-        if ($allDone -or ($winnerFoundAt -gt 0L -and ($raceSw.ElapsedMilliseconds - $winnerFoundAt) -ge 80)) {
+        if ($allDone -or ($winnerFoundAt -gt 0L -and ($raceSw.ElapsedMilliseconds - $winnerFoundAt) -ge 250)) {
             break
         }
         Start-Sleep -Milliseconds 15
@@ -124,6 +234,64 @@ function Wait-CdnRaceProbes {
         PinnedIpTime = $pinnedIpTime
         PinnedIpHttp = $pinnedIpHttp
         AliveIp      = $aliveIp
+    }
+}
+
+function Save-CohCacheAssetFromCdn {
+    param(
+        [string]$AssetPath,
+        [string]$CdnIp,
+        [string]$CohCacheDir
+    )
+    if (-not $AssetPath -or -not $CdnIp -or -not $CohCacheDir) { return $false }
+    if (-not [System.IO.Directory]::Exists($CohCacheDir)) {
+        try { [System.IO.Directory]::CreateDirectory($CohCacheDir) | Out-Null } catch { return $false }
+    }
+    $url = "https://prod-live-front.playbattlegrounds.com$AssetPath"
+    $hash = Get-UrlMd5Hex -Url $url
+    $hdrPath = Join-Path $CohCacheDir "$hash.hdr"
+    $ctxPath = Join-Path $CohCacheDir "$hash.ctx"
+    if ([System.IO.File]::Exists($hdrPath) -and [System.IO.File]::Exists($ctxPath) -and ([System.IO.FileInfo]::new($ctxPath).Length -gt 0)) {
+        return $true
+    }
+
+    $tmpCtx = Join-Path $CohCacheDir "$hash.ctx.tmp"
+    $tmpHdr = Join-Path $CohCacheDir "$hash.hdr.tmp"
+    try {
+        & $curlExe -s -k --connect-timeout 2 --max-time 12 -D $tmpHdr -o $tmpCtx --resolve "prod-live-front.playbattlegrounds.com:443:$CdnIp" $url | Out-Null
+        if (-not [System.IO.File]::Exists($tmpCtx) -or -not [System.IO.File]::Exists($tmpHdr)) { return $false }
+        $ctxLen = [System.IO.FileInfo]::new($tmpCtx).Length
+        if ($ctxLen -le 0) { return $false }
+        $rawHdrLines = [System.IO.File]::ReadAllLines($tmpHdr)
+        $statusOk = $false
+        $headerLines = New-Object System.Collections.Generic.List[string]
+        foreach ($hl in $rawHdrLines) {
+            $trimmed = $hl.Trim()
+            if ($trimmed -match '^HTTP/\d(?:\.\d)?\s+(\d{3})') {
+                $statusOk = ($Matches[1] -eq '200')
+                $headerLines.Clear()
+            } elseif ($trimmed.Length -gt 0) {
+                $headerLines.Add($trimmed)
+            }
+        }
+        if (-not $statusOk) { return $false }
+        $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $expEpoch = $nowEpoch + 86400
+        $outLines = New-Object System.Collections.Generic.List[string]
+        $outLines.Add("200")
+        $outLines.Add("$ctxLen")
+        $outLines.Add("$expEpoch")
+        $outLines.Add("$nowEpoch")
+        foreach ($hLine in $headerLines) { $outLines.Add($hLine) }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::Move($tmpCtx, $ctxPath)
+        [System.IO.File]::WriteAllText($hdrPath, (($outLines -join "`n") + "`n"), $utf8NoBom)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ([System.IO.File]::Exists($tmpCtx)) { try { [System.IO.File]::Delete($tmpCtx) } catch {} }
+        if ([System.IO.File]::Exists($tmpHdr)) { try { [System.IO.File]::Delete($tmpHdr) } catch {} }
     }
 }
 
@@ -168,7 +336,6 @@ try {
         $hasMutex = $true
     }
 
-    # 1. Read hosts file safely and launch batched Steam -Z probe + 7 CDN race probes immediately
     $hostsPath = "$env:SystemRoot\System32\drivers\etc\hosts"
     $hostsData = Read-HostsSafely -Path $hostsPath
     $currentPinnedIp = $null
@@ -184,26 +351,40 @@ try {
         }
     }
 
+    # Tencent COS 43.* IPs redirect GET /?provider=steam to playbattlegrounds.com.cn and poison Global/SEA CohCache hashes.
     $curatedPool = @(
-        "43.174.32.224",  # Singapore (Tencent Edge)
-        "43.152.143.98",  # Singapore/HK (Tencent Edge)
-        "43.168.152.146", # Singapore
-        "43.175.115.189", # Hong Kong
-        "43.174.32.194",  # Singapore
-        "23.66.150.216",  # Akamai SEA
-        "104.69.151.226"  # Akamai SEA
+        "3.162.66.12",
+        "3.162.66.99",
+        "108.157.32.117",
+        "108.157.32.60",
+        "108.157.254.53",
+        "23.66.150.216",
+        "104.69.151.226"
     )
     $candidateIps = @(
-        if ($currentPinnedIp) { $currentPinnedIp }
+        if ($currentPinnedIp -and $currentPinnedIp -notmatch '^43\.') { $currentPinnedIp }
         $curatedPool
     ) | Select-Object -Unique | Select-Object -First 7
 
-    $mainJsPath = "/app/pc-2610-202/main.cb4691e73a746a46.js"
+    $cohCacheDir = Join-Path $env:LOCALAPPDATA "TslGame\Saved\CohCache"
+    $fallbackMainJsPath = "/app/pc-2611-128/main.fd13ca214153224b.js"
 
     $steamProbe = Start-SteamParallelProbe
+    $bundleInfo = Resolve-LivePubgBundle -ProbeIps $candidateIps -CohCacheDir $cohCacheDir -FallbackMainJsPath $fallbackMainJsPath
+    $mainJsPath = $bundleInfo.MainJsPath
+
+    if ($mainJsPath -and $mainJsPath -ne $fallbackMainJsPath) {
+        try {
+            $selfText = [System.IO.File]::ReadAllText($PSCommandPath, [System.Text.Encoding]::UTF8)
+            $updatedSelf = $selfText -replace '\$fallbackMainJsPath\s*=\s*"/app/[^"]+"', "`$fallbackMainJsPath = `"$mainJsPath`""
+            if ($updatedSelf -ne $selfText) {
+                [System.IO.File]::WriteAllText($PSCommandPath, $updatedSelf, (New-Object System.Text.UTF8Encoding($false)))
+            }
+        } catch {}
+    }
+
     $cdnProbes = @(Start-CdnRaceProbes -CandidateIps $candidateIps -MainJsPath $mainJsPath)
 
-    # 2. Fast-path DNS + Native Windows 11 DoH on active physical network adapters (.NET Registry fast path)
     $nics = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
         $_.OperationalStatus -eq 'Up' -and
         $_.NetworkInterfaceType -ne 'Loopback' -and
@@ -269,8 +450,6 @@ try {
         $steamProbe = Start-SteamParallelProbe
     }
 
-    # 3. Run local maintenance while network probes are in flight
-    # 3a. Close any previous orphaned elevated cmd.exe status windows
     try {
         $cmdProcs = @(([wmisearcher]"SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process WHERE Name='cmd.exe' OR ProcessId=$PID").Get())
         $myParentPid = ($cmdProcs | Where-Object { $_.ProcessId -eq $PID } | Select-Object -First 1).ParentProcessId
@@ -281,26 +460,92 @@ try {
         }
     } catch {}
 
-    # 3b. Surgical Coherent GT Cache (CohCache) Integrity Validator & Auto-Repair (.NET fast path)
-    $cohCacheDir = Join-Path $env:LOCALAPPDATA "TslGame\Saved\CohCache"
+    try {
+        $runKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Run", $true)
+        if ($null -ne $runKey) {
+            try {
+                foreach ($warpVal in @("Cloudflare WARP", "CloudflareWARP")) {
+                    if ($null -ne $runKey.GetValue($warpVal, $null)) {
+                        $runKey.DeleteValue($warpVal, $false)
+                    }
+                }
+            } finally {
+                $runKey.Dispose()
+            }
+        }
+        $warpSvc = Get-Service -Name "CloudflareWARP" -ErrorAction SilentlyContinue
+        if ($null -eq $warpSvc -or $warpSvc.Status -ne "Running") {
+            $warpUpd = Get-Service -Name "CloudflareWARPUpdater" -ErrorAction SilentlyContinue
+            if ($null -ne $warpUpd) {
+                if ($warpUpd.StartType -ne "Manual") { Set-Service -Name "CloudflareWARPUpdater" -StartupType Manual -ErrorAction SilentlyContinue }
+                if ($warpUpd.Status -eq "Running") { Stop-Service -Name "CloudflareWARPUpdater" -Force -ErrorAction SilentlyContinue }
+            }
+            Stop-Process -Name "warp-updater-armed" -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name "Cloudflare WARP" -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+
+    try {
+        foreach ($exeName in @("TslGame.exe", "TslGame_ZK.exe", "TslGame_BE.exe", "ExecPubg.exe")) {
+            $ifeoSub = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$exeName\PerfOptions"
+            $curPrio = Get-HklmValue -SubKey $ifeoSub -ValueName "CpuPriorityClass"
+            if ($curPrio -ne 3) {
+                $pk = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($ifeoSub, $true)
+                if ($null -ne $pk) {
+                    try { $pk.SetValue("CpuPriorityClass", 3, [Microsoft.Win32.RegistryValueKind]::DWord) } finally { $pk.Dispose() }
+                }
+            }
+        }
+
+        $tslIfeoSub = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\TslGame.exe\PerfOptions"
+        $defVer = Get-HklmValue -SubKey $tslIfeoSub -ValueName "DefenderExclusionsV2"
+        if ($defVer -ne 2) {
+            Add-MpPreference -ExclusionPath @(
+                "C:\Program Files (x86)\Steam\steamapps\common\PUBG",
+                "C:\Users\Admin\AppData\Local\TslGame",
+                "C:\Program Files (x86)\Common Files\BattlEye",
+                "C:\Program Files\Common Files\PUBG"
+            ) -ExclusionProcess @(
+                "TslGame.exe",
+                "TslGame_ZK.exe",
+                "TslGame_BE.exe",
+                "ExecPubg.exe",
+                "BEService.exe",
+                "BEService_x64.exe",
+                "zksvc.exe",
+                "CoherentUI_Host.exe"
+            ) -ErrorAction SilentlyContinue
+            $pk = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($tslIfeoSub, $true)
+            if ($null -ne $pk) {
+                try { $pk.SetValue("DefenderExclusionsV2", 2, [Microsoft.Win32.RegistryValueKind]::DWord) } finally { $pk.Dispose() }
+            }
+        }
+    } catch {}
+
+    $liveMainJsHash = Get-UrlMd5Hex -Url "https://prod-live-front.playbattlegrounds.com$mainJsPath"
+    $liveBundleCached = $false
     if ([System.IO.Directory]::Exists($cohCacheDir)) {
         $repairedCount = 0
+        $refreshedCount = 0
         $dirInfo = [System.IO.DirectoryInfo]::new($cohCacheDir)
         $allFiles = $dirInfo.GetFiles()
         $byName = @{}
         foreach ($f in $allFiles) { $byName[$f.Name] = $f }
+
+        $validHdrList = New-Object System.Collections.Generic.List[object]
 
         foreach ($f in $allFiles) {
             if ($f.Extension -eq '.hdr') {
                 $ctxName = [System.IO.Path]::ChangeExtension($f.Name, '.ctx')
                 $ctxFile = $byName[$ctxName]
                 $corrupt = $false
+                $headLines = $null
                 if ($f.Length -eq 0 -or $null -eq $ctxFile -or $ctxFile.Length -eq 0) {
                     $corrupt = $true
                 } else {
                     try {
                         $headLines = [System.IO.File]::ReadAllLines($f.FullName)
-                        if ($headLines.Count -lt 2) {
+                        if ($headLines.Count -lt 4) {
                             $corrupt = $true
                         } else {
                             $status = $headLines[0].Trim()
@@ -320,6 +565,11 @@ try {
                         try { $ctxFile.Delete() } catch {}
                     }
                     $repairedCount++
+                } else {
+                    if ($f.Name -eq "$liveMainJsHash.hdr") {
+                        $liveBundleCached = $true
+                    }
+                    $validHdrList.Add([PSCustomObject]@{ File = $f; Lines = $headLines })
                 }
             } elseif ($f.Extension -eq '.ctx') {
                 $hdrName = [System.IO.Path]::ChangeExtension($f.Name, '.hdr')
@@ -329,12 +579,35 @@ try {
                 }
             }
         }
+
+        # CoherentUI_Host.exe requires .hdr line 2 to be fetch_epoch + 86400 in UTF-8 LF without BOM.
+        if ($liveBundleCached -and $validHdrList.Count -gt 0) {
+            $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            $newExpiry = $nowEpoch + 86400
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            foreach ($item in $validHdrList) {
+                $hl = $item.Lines
+                $curExp = 0L
+                [long]::TryParse($hl[2].Trim(), [ref]$curExp) | Out-Null
+                if ($curExp -gt 0 -and $curExp -lt ($nowEpoch + 82800)) {
+                    $hl[2] = "$newExpiry"
+                    $hl[3] = "$nowEpoch"
+                    try {
+                        [System.IO.File]::WriteAllText($item.File.FullName, (($hl -join "`n") + "`n"), $utf8NoBom)
+                        $refreshedCount++
+                    } catch {}
+                }
+            }
+        }
+
         if ($repairedCount -gt 0) {
             Write-Host "  [+] Da don dep $repairedCount file cache Coherent GT bi loi/dut quang."
         }
+        if ($refreshedCount -gt 0) {
+            Write-Host "  [+] Da gia han 24h TTL cho $refreshedCount file cache Coherent GT ($($bundleInfo.AppDir))."
+        }
     }
 
-    # 3c. Fast-path Scheduled Task maintenance (only invoke Set-ScheduledTask when needed)
     $tasksDir = "$env:SystemRoot\System32\Tasks"
     if ([System.IO.File]::Exists("$tasksDir\GoodbyeDPI-Toggle")) {
         Unregister-ScheduledTask -TaskName 'GoodbyeDPI-Toggle' -Confirm:$false | Out-Null
@@ -353,52 +626,13 @@ try {
         }
     }
 
-    # 4. Collect parallel 512 KB CDN benchmark results (with Wave 2 fallback only when Wave 1 fails)
     $raceResult = Wait-CdnRaceProbes -Probes $cdnProbes -PinnedIp $currentPinnedIp
-
-    if (-not $raceResult.BestIp) {
-        $discoveryIps = @(
-            if ($raceResult.AliveIp) { $raceResult.AliveIp }
-            $candidateIps
-        ) | Where-Object { $_ } | Select-Object -Unique
-
-        $discoveredPath = $null
-        foreach ($dIp in $discoveryIps) {
-            $htmlToCheck = (& $curlExe -s -k --connect-timeout 1 --max-time 2 --resolve "prod-live-front.playbattlegrounds.com:443:$dIp" "https://prod-live-front.playbattlegrounds.com/index.html") -join "`n"
-            if (($htmlToCheck -join "`n") -match '(/app/[^"'']+/index\.html)') {
-                $appIndexPath = $Matches[1]
-                $appDir = $appIndexPath -replace '/index\.html$', ''
-                $appHtml = (& $curlExe -s -k --connect-timeout 1 --max-time 2 --resolve "prod-live-front.playbattlegrounds.com:443:$dIp" "https://prod-live-front.playbattlegrounds.com$appIndexPath") -join "`n"
-                if (($appHtml -join "`n") -match '(/app/[^"'']+/js/main\.[^"'']+\.js)') {
-                    $discoveredPath = $Matches[1]
-                    break
-                } elseif (($appHtml -join "`n") -match '((?:js/)?main\.[a-f0-9]+\.js)') {
-                    $discoveredPath = "$appDir/$($Matches[1])"
-                    break
-                }
-            }
-        }
-
-        if ($discoveredPath -and $discoveredPath -ne $mainJsPath) {
-            $mainJsPath = $discoveredPath
-            try {
-                $selfText = [System.IO.File]::ReadAllText($PSCommandPath, [System.Text.Encoding]::UTF8)
-                $updatedSelf = $selfText -replace '\$mainJsPath\s*=\s*"/app/[^"]+"', "`$mainJsPath = `"$mainJsPath`""
-                if ($updatedSelf -ne $selfText) {
-                    [System.IO.File]::WriteAllText($PSCommandPath, $updatedSelf, (New-Object System.Text.UTF8Encoding($false)))
-                }
-            } catch {}
-            $retryProbes = @(Start-CdnRaceProbes -CandidateIps $candidateIps -MainJsPath $mainJsPath)
-            $raceResult = Wait-CdnRaceProbes -Probes $retryProbes -PinnedIp $currentPinnedIp
-        }
-    }
 
     $bestIp = $raceResult.BestIp
     $bestTime = $raceResult.BestTime
     $bestHttp = $raceResult.BestHttp
 
-    # Apply 40 ms hysteresis band so currentPinnedIp is kept when within 40 ms of the winner
-    if ($bestIp -and $currentPinnedIp -and $pinnedLineCount -eq 1 -and $raceResult.PinnedIpTime -lt 999.0) {
+    if ($bestIp -and $currentPinnedIp -and $currentPinnedIp -notmatch '^43\.' -and $pinnedLineCount -eq 1 -and $raceResult.PinnedIpTime -lt 999.0) {
         if (($raceResult.PinnedIpTime - $bestTime) -le 0.040) {
             $bestIp = $currentPinnedIp
             $bestTime = $raceResult.PinnedIpTime
@@ -406,7 +640,6 @@ try {
         }
     }
 
-    # 5. Atomically update C:\Windows\System32\drivers\etc\hosts (or unpin dead IPs if all probes failed)
     if ($hostsData.Success) {
         if ($bestIp) {
             if ($bestIp -ne $currentPinnedIp -or $pinnedLineCount -ne 1) {
@@ -424,7 +657,18 @@ try {
         }
     }
 
-    # 6. Collect and display batched parallel endpoint verification results
+    if (-not $liveBundleCached -and $bestIp -and $bundleInfo.Assets.Count -gt 0) {
+        $warmedCount = 0
+        foreach ($assetPath in $bundleInfo.Assets) {
+            if (Save-CohCacheAssetFromCdn -AssetPath $assetPath -CdnIp $bestIp -CohCacheDir $cohCacheDir) {
+                $warmedCount++
+            }
+        }
+        if ($warmedCount -gt 0) {
+            Write-Host "  [+] Da nap truoc $warmedCount file Lobby bundle moi ($($bundleInfo.AppDir)) vao CohCache."
+        }
+    }
+
     Write-Host ""
     Write-Host "[3/3] Ket qua verify ket noi song song den Steam va PUBG:"
     $steamLabels = @(
@@ -458,9 +702,9 @@ try {
     }
     if ($bestIp) {
         $btStr = $bestTime.ToString("F3", $inv)
-        Write-Host ("  - PUBG Lobby 512KB (prod-live-front)   : HTTP {0} | IP: {1,-15} | Time: {2}s" -f $bestHttp, $bestIp, $btStr)
+        Write-Host ("  - PUBG Lobby 2MB (prod-live-front)     : HTTP {0} | IP: {1,-15} | Time: {2}s" -f $bestHttp, $bestIp, $btStr)
     } else {
-        Write-Host "  - PUBG Lobby 512KB (prod-live-front)   : KHONG TIM THAY IP CDN PHU HOP (Da chuyen ve Google DNS)"
+        Write-Host "  - PUBG Lobby 2MB (prod-live-front)     : KHONG TIM THAY IP CDN PHU HOP (Da chuyen ve Google DNS)"
     }
 } finally {
     if ($hasMutex) {
@@ -469,7 +713,6 @@ try {
     try { $mutex.Dispose() } catch {}
 }
 
-# 7. Display status banner OUTSIDE the mutex and exit cleanly
 Write-Host ""
 if ($env:SVC_OK -eq "0") {
     Write-Host "LOI: GoodbyeDPI khong bat duoc. Chay CAI_DAT_1_CLICK.cmd de sua."
