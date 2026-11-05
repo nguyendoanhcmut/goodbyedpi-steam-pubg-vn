@@ -15,6 +15,7 @@ dota2.com
 csgo.com
 s.team
 playbattlegrounds.com
+battlegroundsgame.com
 pubg.com
 pubg.io
 pubg.dev

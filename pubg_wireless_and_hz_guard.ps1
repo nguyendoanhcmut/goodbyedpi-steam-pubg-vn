@@ -50,6 +50,168 @@ public static class PubgNativeGuard {
 }
 "@
 
+function Disable-PubgStartupMovies {
+    param(
+        [string]$MoviesDir,
+        [string]$EngineIniPath
+    )
+    if ($MoviesDir -and [System.IO.Directory]::Exists($MoviesDir)) {
+        try {
+            $mp4Files = [System.IO.Directory]::GetFiles($MoviesDir, "*.mp4", [System.IO.SearchOption]::AllDirectories)
+            foreach ($mp4 in $mp4Files) {
+                $bak = "$mp4.bak"
+                try {
+                    if ([System.IO.File]::Exists($bak)) {
+                        [System.IO.File]::SetAttributes($bak, [System.IO.FileAttributes]::Normal)
+                        [System.IO.File]::Delete($bak)
+                    }
+                    [System.IO.File]::Move($mp4, $bak)
+                } catch {}
+            }
+        } catch {}
+    }
+    if ($EngineIniPath -and [System.IO.File]::Exists($EngineIniPath)) {
+        try {
+            $rawIni = [System.IO.File]::ReadAllText($EngineIniPath, [System.Text.Encoding]::UTF8)
+            $needsUpdate = ($rawIni -notmatch 'bWaitForMoviesToComplete=False') -or
+                           ($rawIni -notmatch 'bMoviesAreSkippable=True') -or
+                           ($rawIni -notmatch '-StartupMovies=')
+            if ($needsUpdate) {
+                [System.IO.File]::SetAttributes($EngineIniPath, [System.IO.FileAttributes]::Normal)
+                if ($rawIni -notmatch '\[/Script/MoviePlayer\.MoviePlayerSettings\]') {
+                    $rawIni = $rawIni.TrimEnd() + "`r`n`r`n[/Script/MoviePlayer.MoviePlayerSettings]`r`nbWaitForMoviesToComplete=False`r`nbMoviesAreSkippable=True`r`n-StartupMovies=`r`n"
+                } else {
+                    if ($rawIni -notmatch 'bWaitForMoviesToComplete=False') {
+                        $rawIni = $rawIni -replace '(\[/Script/MoviePlayer\.MoviePlayerSettings\])', "`$1`r`nbWaitForMoviesToComplete=False"
+                    }
+                    if ($rawIni -notmatch 'bMoviesAreSkippable=True') {
+                        $rawIni = $rawIni -replace '(\[/Script/MoviePlayer\.MoviePlayerSettings\])', "`$1`r`nbMoviesAreSkippable=True"
+                    }
+                    if ($rawIni -notmatch '-StartupMovies=') {
+                        $rawIni = $rawIni -replace '(\[/Script/MoviePlayer\.MoviePlayerSettings\])', "`$1`r`n-StartupMovies="
+                    }
+                }
+                [System.IO.File]::WriteAllText($EngineIniPath, $rawIni, (New-Object System.Text.UTF8Encoding($false)))
+            }
+            $attr = [System.IO.File]::GetAttributes($EngineIniPath)
+            if (($attr -band [System.IO.FileAttributes]::ReadOnly) -eq 0) {
+                [System.IO.File]::SetAttributes($EngineIniPath, ($attr -bor [System.IO.FileAttributes]::ReadOnly))
+            }
+        } catch {}
+    }
+}
+
+function Sync-PubgIntegrityCheckHistory {
+    param(
+        [string]$BinariesWin64Dir,
+        [string]$HistoryCsvPath
+    )
+    if (-not $BinariesWin64Dir -or -not $HistoryCsvPath) { return 0 }
+    $hashCsvPath = Join-Path $BinariesWin64Dir "TslGame_Hash.csv"
+    if (-not [System.IO.File]::Exists($hashCsvPath)) { return 0 }
+
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $clientVersion = $null
+    $existingLines = @()
+    if ([System.IO.File]::Exists($HistoryCsvPath)) {
+        try {
+            $existingLines = [System.IO.File]::ReadAllLines($HistoryCsvPath, [System.Text.Encoding]::UTF8)
+            foreach ($el in $existingLines) {
+                $parts = $el -split ','
+                if ($parts.Count -ge 3 -and $parts[1] -match '^\d+\.\d+\.\d+\.\d+$') {
+                    $vCandidate = $parts[1].Trim()
+                    if (-not $clientVersion -or ([version]$vCandidate -gt [version]$clientVersion)) {
+                        $clientVersion = $vCandidate
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    $tslExePath = Join-Path $BinariesWin64Dir "TslGame.exe"
+    if ([System.IO.File]::Exists($tslExePath)) {
+        try {
+            $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($tslExePath)
+            if ($vi.FileMajorPart -gt 0) {
+                $exeVer = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart).$($vi.FilePrivatePart)"
+                if (-not $clientVersion -or ([version]$exeVer -ge [version]$clientVersion)) {
+                    $clientVersion = $exeVer
+                }
+            }
+        } catch {}
+    }
+    if (-not $clientVersion) { return 0 }
+
+    $existingSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($el in $existingLines) {
+        if ($el) { [void]$existingSet.Add($el.Trim()) }
+    }
+
+    $rawHashLines = [System.IO.File]::ReadAllLines($hashCsvPath, [System.Text.Encoding]::UTF8)
+    $targetLines = New-Object System.Collections.Generic.List[string]($rawHashLines.Count)
+    $needsWrite = $false
+
+    foreach ($hl in $rawHashLines) {
+        if ($hl -match '^"([^"]+)"') {
+            $relPath = $Matches[1]
+            try {
+                $fullPath = [System.IO.Path]::GetFullPath((Join-Path $BinariesWin64Dir $relPath))
+                if ([System.IO.File]::Exists($fullPath)) {
+                    $fi = [System.IO.FileInfo]::new($fullPath)
+                    $stamp = $fi.LastWriteTimeUtc.ToString("yyyy.MM.dd-HH.mm.ss", $inv)
+                    $normPath = $fullPath.Replace('\', '/')
+                    $entry = "$normPath,$clientVersion,$stamp"
+                    $targetLines.Add($entry)
+                    if (-not $existingSet.Contains($entry)) {
+                        $needsWrite = $true
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    if ($targetLines.Count -gt 0 -and ($needsWrite -or $existingLines.Count -ne $targetLines.Count)) {
+        try {
+            $histDir = [System.IO.Path]::GetDirectoryName($HistoryCsvPath)
+            if ($histDir -and -not [System.IO.Directory]::Exists($histDir)) {
+                [System.IO.Directory]::CreateDirectory($histDir) | Out-Null
+            }
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            $tmpHist = "$HistoryCsvPath.tmp"
+            [System.IO.File]::WriteAllLines($tmpHist, $targetLines.ToArray(), $utf8NoBom)
+            [System.IO.File]::Copy($tmpHist, $HistoryCsvPath, $true)
+            [System.IO.File]::Delete($tmpHist)
+            return $targetLines.Count
+        } catch {}
+    }
+    return 0
+}
+
+function Invoke-PubgBinaryPageCacheWarmup {
+    param([string]$BinariesWin64Dir)
+    if (-not $BinariesWin64Dir -or -not [System.IO.Directory]::Exists($BinariesWin64Dir)) { return }
+    $buf = New-Object byte[] 4194304
+    $warmTargets = @(
+        (Join-Path $BinariesWin64Dir "TslGame.exe"),
+        (Join-Path $BinariesWin64Dir "TslGame_ZK.exe"),
+        (Join-Path $BinariesWin64Dir "ExecPubg.exe"),
+        (Join-Path $BinariesWin64Dir "TslGame_BE.exe"),
+        "C:\Program Files (x86)\Common Files\BattlEye\BEService.exe"
+    )
+    foreach ($fp in $warmTargets) {
+        if ([System.IO.File]::Exists($fp)) {
+            try {
+                $fs = New-Object System.IO.FileStream($fp, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 4194304, [System.IO.FileOptions]::SequentialScan)
+                try {
+                    while ($fs.Read($buf, 0, $buf.Length) -gt 0) {}
+                } finally {
+                    $fs.Dispose()
+                }
+            } catch {}
+        }
+    }
+}
+
 & powercfg.exe /setacvalueindex SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 | Out-Null
 & powercfg.exe /setdcvalueindex SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 | Out-Null
 & powercfg.exe /setactive SCHEME_CURRENT | Out-Null
@@ -59,7 +221,14 @@ $negVer = [uint32]0
 $wlanHandle = [IntPtr]::Zero
 [void][PubgNativeGuard]::WlanOpenHandle(2, [IntPtr]::Zero, [ref]$negVer, [ref]$wlanHandle)
 
+$pubgAcfPath = "C:\Program Files (x86)\Steam\steamapps\appmanifest_578080.acf"
+$pubgBinariesWin64Dir = "C:\Program Files (x86)\Steam\steamapps\common\PUBG\TslGame\Binaries\Win64"
 $pubgMoviesDir = "C:\Program Files (x86)\Steam\steamapps\common\PUBG\TslGame\Content\Movies"
+$engineIniPath = Join-Path $env:LOCALAPPDATA "TslGame\Saved\Config\WindowsNoEditor\Engine.ini"
+$integrityCsvPath = Join-Path $env:LOCALAPPDATA "TslGame\Saved\IntegrityCheck\IntegrityCheckHistory.csv"
+
+Disable-PubgStartupMovies -MoviesDir $pubgMoviesDir -EngineIniPath $engineIniPath
+[void](Sync-PubgIntegrityCheckHistory -BinariesWin64Dir $pubgBinariesWin64Dir -HistoryCsvPath $integrityCsvPath)
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($isAdmin) {
@@ -76,18 +245,26 @@ if ($isAdmin) {
         "C:\Program Files (x86)\Steam\steamapps\common\PUBG",
         "C:\Users\Admin\AppData\Local\TslGame",
         "C:\Program Files (x86)\Common Files\BattlEye",
-        "C:\Program Files\Common Files\PUBG"
+        "C:\Program Files (x86)\Common Files\BattlEye\BEDaisy.sys",
+        "C:\Program Files\Common Files\PUBG",
+        "C:\Program Files\Common Files\PUBG\navagio.sys"
     ) -ExclusionProcess @(
         "TslGame.exe",
         "TslGame_ZK.exe",
         "TslGame_BE.exe",
         "ExecPubg.exe",
         "BEService.exe",
+        "BEService_pubg.exe",
         "BEService_x64.exe",
+        "BEDaisy.sys",
         "zksvc.exe",
+        "navagio.sys",
         "CoherentUI_Host.exe"
     ) -ErrorAction SilentlyContinue
 }
+
+$lastAcfWriteUtc = if ([System.IO.File]::Exists($pubgAcfPath)) { [System.IO.File]::GetLastWriteTimeUtc($pubgAcfPath) } else { [DateTime]::MinValue }
+$wasLaunching = $false
 
 $tick = 0
 try {
@@ -104,22 +281,39 @@ try {
             }
         }
 
-        if (($tick % 6) -eq 0) {
-            if (Test-Path -LiteralPath $pubgMoviesDir) {
-                Get-ChildItem -LiteralPath $pubgMoviesDir -Filter "*.mp4" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-                    Move-Item -LiteralPath $_.FullName -Destination "$($_.FullName).bak" -Force -ErrorAction SilentlyContinue
-                }
-            }
-        }
-
-        foreach ($procName in @("TslGame", "TslGame_ZK", "TslGame_BE", "ExecPubg")) {
+        $launchDetected = $false
+        foreach ($procName in @("ExecPubg", "TslGame_ZK", "TslGame_BE", "TslGame")) {
             $procs = [System.Diagnostics.Process]::GetProcessesByName($procName)
+            if ($procs.Length -gt 0 -and ($procName -eq "ExecPubg" -or $procName -eq "TslGame_ZK")) {
+                $launchDetected = $true
+            }
             foreach ($p in $procs) {
                 try {
                     if ($p.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::Normal) {
                         $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
                     }
                 } catch {}
+            }
+        }
+
+        if ($launchDetected) {
+            Disable-PubgStartupMovies -MoviesDir $pubgMoviesDir -EngineIniPath $engineIniPath
+            if (-not $wasLaunching) {
+                [void](Sync-PubgIntegrityCheckHistory -BinariesWin64Dir $pubgBinariesWin64Dir -HistoryCsvPath $integrityCsvPath)
+                Invoke-PubgBinaryPageCacheWarmup -BinariesWin64Dir $pubgBinariesWin64Dir
+            }
+        }
+        $wasLaunching = $launchDetected
+
+        if (($tick % 6) -eq 0) {
+            Disable-PubgStartupMovies -MoviesDir $pubgMoviesDir -EngineIniPath $engineIniPath
+            if ([System.IO.File]::Exists($pubgAcfPath)) {
+                $curWriteUtc = [System.IO.File]::GetLastWriteTimeUtc($pubgAcfPath)
+                if ($curWriteUtc -ne $lastAcfWriteUtc) {
+                    $lastAcfWriteUtc = $curWriteUtc
+                    Disable-PubgStartupMovies -MoviesDir $pubgMoviesDir -EngineIniPath $engineIniPath
+                    [void](Sync-PubgIntegrityCheckHistory -BinariesWin64Dir $pubgBinariesWin64Dir -HistoryCsvPath $integrityCsvPath)
+                }
             }
         }
 
