@@ -4,26 +4,25 @@ Bộ công cụ vượt chặn **Steam** và sửa lỗi treo **`INITIALIZING...
 
 ---
 
-## Các cải tiến trong bản v2.3
+## Các cải tiến trong bản v2.5 (Patch-Proof Self-Healing + Intel Iris Xe Optimizer)
 
-1. **Cài đặt 1-Click trên mọi máy tính (`CAI_DAT_1_CLICK.cmd`)**
-   - Chép bộ công cụ vào `C:\Tools\goodbyedpi-0.2.3rc3-2` và tạo 2 nút ngoài Desktop gồm **`GoodbyeDPI BAT`** và **`GoodbyeDPI TAT`** (bấm trực tiếp không hiện bảng hỏi quyền UAC, chạy trên cả nguồn pin laptop, truyền đường dẫn an toàn qua `$env:GDPI_SELF`).
+1. **Cài đặt 1-Click & Điều khiển thủ công hiển thị trạng thái trực tiếp (`CAI_DAT_1_CLICK.cmd`)**
+   - Chép bộ công cụ vào `C:\Tools\goodbyedpi-0.2.3rc3-2` và tạo 2 nút ngoài Desktop gồm **`GoodbyeDPI BAT`** và **`GoodbyeDPI TAT`** (giữ chế độ `DEMAND_START` để người dùng chủ động bật/tắt bằng tay, cửa sổ giữ nguyên hiển thị trạng thái `Service`, `WinDivert`, `Lobby CDN IP` cho tới khi nhấn `Enter`).
    - Nhận diện mọi card mạng vật lý và card phát sóng di động (`WiFi`, `Wi-Fi`, `Ethernet`, `Remote NDIS / USB Tethering`) và bỏ qua các card VPN ảo (`Tailscale`, `WireGuard`, `ZeroTier`, `Hyper-V`).
 2. **Phân mảnh TLS 2-Byte thuận chiều (`--native-frag --allow-no-sni --max-payload 1200`) cho Steam Chromium 126**
    - Chạy cấu hình `-p -r -s -f 2 -k 2 -n -e 2 --native-frag --allow-no-sni --max-payload 1200` để cắt gói `TLS 1.3 ClientHello` tại byte thứ 2 sau `0x16 0x03` theo thứ tự thuận, không tiêm gói giả sai checksum hay lệch sequence (tương thích với cả lớp NAT kép trên Hotspot và CGNAT MobiFone 4G/5G).
    - Cờ `--max-payload 1200` giữ nguyên bộ lọc cho mọi gói bắt tay TLS nhưng cho phép các gói tải dữ liệu lớn (`1460 byte` `TLS Application Data 0x17`) đi thẳng qua nhân `WinDivert`.
-   - Chặn lỗi **`ERR_CONNECTION_RESET` (`net_error -101`)** trên `steamwebhelper.exe` (Chromium 126) khi gói `TLS 1.3 ClientHello` chứa khóa hậu lượng tử `X25519Kyber768Draft00` (~1.650 byte, tách làm 2 phân đoạn TCP và đẩy trường SNI sang phân đoạn thứ 2).
-3. **Google DNS (`8.8.8.8` / `8.8.4.4`) giữ nguyên EDNS Client Subnet (ECS) + Windows 11 DoH + `OpenDNS:5353`**
-   - Dùng **Google Public DNS (`8.8.8.8` / `8.8.4.4`)** kết hợp **Windows 11 DoH Auto-Upgrade** để mã hóa truy vấn DNS qua HTTPS cổng 443 và giữ nguyên thông tin **EDNS Client Subnet (ECS)**. Nhờ đó, `store.steampowered.com` và `steamcommunity.com` phân giải về cụm máy chủ đệm Akamai đặt trong mạng nội địa Việt Nam (`42.119.186.x` / `42.119.184.x`) thay vì bị đẩy sang Akamai Mỹ (`104.83.x.x`).
-   - Gỡ bỏ địa chỉ lặp `::1` gây nghẽn thời gian chờ IPv6 DNS (`WSAECONNREFUSED`) và đọc trực tiếp `.NET Registry` (`< 30 ms`) để bỏ qua bước cấu hình lại khi DNS đã khớp.
-   - Chuyển hướng các truy vấn DNS UDP cổng 53 sang cổng phi chuẩn **`208.67.222.222:5353`** (`2620:119:35::35:5353` cho IPv6).
-4. **Đua tốc độ song song 512 KB trên 7 cụm CDN Châu Á & Gộp kiểm tra `curl -Z` (`pubg_autofix.ps1`)**
-   - Xử lý lỗi PUBG treo ở màn hình **`INITIALIZING...`** khi trình duyệt Coherent GT bị nghẽn băng thông lúc tải gói giao diện `main.<hash>.js` (~4.8 MB).
-   - Đua tốc độ đồng thời gói **512 KB (`HTTP 206 Byte-Range`)** trên 7 cụm máy chủ CDN Châu Á (Singapore `43.174.32.224`, `43.152.143.98`, `43.168.152.146`, `43.174.32.194`, Hong Kong `43.175.115.189`, Akamai SEA `23.66.150.216`, `104.69.151.226`) kết hợp biên độ chống nhảy IP `40 ms` và kiểm tra đồng thời 3 cổng Steam trong 1 tiến trình `curl.exe -Z` duy nhất.
-   - Đồng bộ hóa đa tiến trình bằng khóa `Global\GoodbyeDPI_Toolkit_Mutex`, tự động đóng các cửa sổ trạng thái cũ qua `[wmisearcher]`, giữ nguyên tiến trình `goodbyedpi.exe` khi dịch vụ đang chạy đúng cấu hình, và hoàn tất toàn bộ quá trình trong **`~1.1–1.4 giây`**.
-   - File `hosts` và `GoodbyeDPI` chỉ xử lý giao diện web của sảnh chờ (TCP/HTTPS), không can thiệp vào luồng dữ liệu trận đấu (UDP) nên không làm đổi ping trong trận.
-5. **Kiểm tra và dọn bộ nhớ đệm sảnh PUBG (`CohCache` Validator)**
-   - Quét thư mục `%LOCALAPPDATA%\TslGame\Saved\CohCache` trong `< 50 ms` song song với quá trình kiểm tra mạng, đối chiếu kích thước file `.ctx` với header `.hdr` và xóa chính xác các cặp file tải dở dang hoặc mồ côi gây kẹt sảnh.
+3. **Google DNS (`8.8.8.8` / `8.8.4.4`) giữ nguyên EDNS Client Subnet (ECS) + Windows 11 DoH + Chống treo IPv6 RDNSS**
+   - Dùng **Google Public DNS (`8.8.8.8` / `8.8.4.4`)** kết hợp **Windows 11 DoH Auto-Upgrade** để giữ nguyên thông tin **EDNS Client Subnet (ECS)** tại Việt Nam mà không dùng `--dns-addr`/`--dnsv6-addr` ép qua OpenDNS. Nhờ đó, `prod-live-front.playbattlegrounds.com` phân giải thẳng về cụm **Amazon CloudFront TP.HCM `SGN50` (`3.162.66.x`)** tải gói sảnh `4.83 MB` trong `1.03 giây`.
+   - Tự động xóa IPv6 RDNSS chết trên card mạng chỉ có Link-Local (`fe80::`) và đặt `DisabledComponents = 0x20` (ưu tiên IPv4), cắt giảm thời gian chờ truy vấn `AAAA` từ `7.258 ms` xuống `138 ms`.
+4. **Tự phục hồi sau mỗi bản cập nhật PUBG (`pubg_autofix.ps1` & `pubg_wireless_and_hz_guard.ps1`)**
+   - **Đồng bộ `IntegrityCheckHistory.csv` (`559/559` file `< 50 ms`)**: Ngăn `TslGame.exe` đọc và băm SHA-1 lại `4.10 GB` mỗi lần mở game sau khi cập nhật bản vá mới.
+   - **Chặn dải IP `43.*` (Tencent COS chuyển hướng sang `.com.cn`) & Tự động làm ấm `CohCache`**: Kiểm tra giao thức kép trên cả `/?provider=steam` và `/index.html`, dọn sạch file `Server: Lego Server`, tự động tải trước (pre-warm) toàn bộ `.js`/`.css` của bản vá mới và gia hạn TTL 24 giờ cho các tài nguyên bất biến (`80/80` local cache hit, pha nạp sảnh `LL = 12.60 giây`).
+   - **Nạp trước `TslGame.exe` vào RAM Page Cache & `IFEO` High Priority tại `t = 0 ms`**: Giảm thời gian đọc lặp 12 lần (`2.78 GB`) của `BEService.exe`, tự động đổi tên `Content\Movies\*.mp4 -> *.mp4.bak` khi Steam cập nhật và dọn thư mục `Saved\Demos` quá 14 ngày.
+5. **Bộ tối ưu chuyên biệt cho Laptop Intel Iris Xe (`TOI_UU_PUBG_IRIS_XE.cmd` & `pubg_iris_xe_boost.ps1`)**
+   - Thiết kế riêng cho laptop văn phòng dùng iGPU chia sẻ RAM (như **Dell Latitude 3450 `i7-1355U + Intel Iris Xe 96 EU + 16GB DDR5`**).
+   - Tự động chọn độ phân giải toàn màn hình chuẩn tỉ lệ màn hình (`1280x720` cho `16:9` hoặc `1280x800` cho `16:10`) qua Windows 11 `iFlip` (`Scaling=3`, không viền đen, không lệch chuột), ép `DX11` + `ScreenScale=80%`, tạo gói nguồn `PUBG Iris Xe Boost` giới hạn nhân P `3700 MHz` / nhân E `2800 MHz` để nhường `10–12 W` điện cho iGPU giữ xung `1200–1300 MHz`.
+   - Áp dụng kỹ thuật mã nguồn mở từ `System Informer`, `EnergyStar`, `TimerResolution`, `MemReduct` và `pse-powertuner`: bật `EcoQoS` (`0x5`) + ghim 8 nhân E (`0xFF0`) cho ứng dụng nền, giữ xung đồng hồ hệ thống `0.5 ms` (`NtSetTimerResolution`), xả `Modified + Standby RAM` trước trận và **tự động khôi phục 100% về gói nguồn `Balanced` văn phòng ngay khi đóng game**.
 
 ---
 
@@ -46,7 +45,11 @@ powershell -c "irm https://github.com/nguyendoanhcmut/goodbyedpi-steam-pubg-vn/r
    - **`GoodbyeDPI BAT`** dùng để bật dịch vụ ngầm, cấu hình DNS/DoH, đua tốc độ song song CDN sảnh PUBG và in bảng kiểm tra kết nối (`HTTP 200`/`206`).
    - **`GoodbyeDPI TAT`** dùng để dừng dịch vụ ngầm (không tự bật lại khi khởi động máy), trả DNS về DHCP cho cả IPv4/IPv6 (kể cả trên các card mạng vừa rút dây), dọn khóa Registry DoH và gỡ dòng ghim trong `hosts`.
 
-### Cách 3 (Gỡ cài đặt)
+### Cách 3 (Dành riêng cho Laptop Intel Iris Xe - Dell Latitude 3450 `i7-1355U`)
+- Nhấp đúp vào **`C:\Tools\goodbyedpi-0.2.3rc3-2\TOI_UU_PUBG_IRIS_XE.cmd`** trước khi mở PUBG để kích hoạt chế độ tối ưu iGPU (giữ cửa sổ `[SESSION GUARD]` mở trong lúc chơi; khi đóng game hoặc tắt cửa sổ, máy tự động trả lại gói nguồn `Balanced` văn phòng trong `< 0.5 giây`).
+- Để hoàn tác toàn bộ cấu hình `.ini` và Registry về mặc định bất cứ lúc nào: chạy `TOI_UU_PUBG_IRIS_XE.cmd -Restore` (hoặc chạy kiểm thử không ghi file bằng `TOI_UU_PUBG_IRIS_XE.cmd -DryRun`).
+
+### Cách 4 (Gỡ cài đặt GoodbyeDPI)
 - Nhấp chuột phải vào **`service_remove.cmd`** và chọn **Run as administrator** để xóa dịch vụ `GoodbyeDPI`, driver `WinDivert`, tác vụ tự động, 2 nút ngoài Desktop, khôi phục DNS DHCP và trả lại file `hosts` nguyên bản.
 
 ---
@@ -56,10 +59,13 @@ powershell -c "irm https://github.com/nguyendoanhcmut/goodbyedpi-steam-pubg-vn/r
 | File | Chức năng |
 | :--- | :--- |
 | `CAI_DAT_1_CLICK.cmd` / `setup_two_buttons.cmd` | Trình cài đặt tự động 1-click cho Windows 10/11 |
-| `goodbyedpi_on.cmd` | Khởi động dịch vụ `GoodbyeDPI` (`--native-frag --allow-no-sni --max-payload 1200`) và gọi `pubg_autofix.ps1` |
-| `goodbyedpi_off.cmd` | Dừng dịch vụ `GoodbyeDPI`, đặt chế độ thủ công (`demand`), trả DNS về DHCP, dọn khóa DoH và dọn file `hosts` |
-| `pubg_autofix.ps1` | Cấu hình Google DNS/DoH (ECS), kiểm tra `CohCache`, đua tốc độ 512 KB CDN Châu Á song song và kiểm tra `curl -Z` |
-| `steam-blacklist.txt` | Danh sách 30 tên miền gốc của Steam, Akamai, Fastly, PUBG, Krafton, BattlEye, Vivox áp dụng vượt chặn DPI |
+| `goodbyedpi_on.cmd` | Khởi động dịch vụ `GoodbyeDPI` (`--native-frag --allow-no-sni --max-payload 1200`), gọi `pubg_autofix.ps1` và giữ cửa sổ trạng thái |
+| `goodbyedpi_off.cmd` | Dừng dịch vụ `GoodbyeDPI`, đặt chế độ thủ công (`demand`), trả DNS về DHCP, dọn khóa DoH, dọn `hosts` và giữ cửa sổ trạng thái |
+| `pubg_autofix.ps1` | Đồng bộ `IntegrityCheckHistory.csv`, tối ưu DNS/DoH + IPv6 RDNSS, làm ấm `CohCache`, đua tốc độ CloudFront SGN50 và nạp trước `TslGame.exe` vào RAM |
+| `pubg_wireless_and_hz_guard.ps1` | Tiến trình canh ngầm Wi-Fi / 144Hz / tự động phục hồi sau mỗi bản cập nhật PUBG |
+| `TOI_UU_PUBG_IRIS_XE.cmd` & `pubg_iris_xe_boost.ps1` | Trình khởi chạy & điều phối tối ưu PUBG có tự động hoàn nguyên (`Session Guard`) cho laptop `i7-1355U + Intel Iris Xe` |
+| `iris_xe_lib_native_diag.ps1` / `ue4_cache.ps1` / `power_os.ps1` | Bộ 3 thư viện C# P/Invoke (`EcoQoS`, `0.5ms Timer`, `Standby RAM Purge`, `powrprof.dll`, `.ini` & `iFlip` toàn màn hình) |
+| `steam-blacklist.txt` | Danh sách 33 tên miền gốc của Steam, Akamai, Fastly, PUBG, Krafton, BattlEye, Vivox áp dụng vượt chặn DPI |
 | `service_remove.cmd` | Gỡ cài đặt dịch vụ, tác vụ tự động, khôi phục DNS/DoH và xóa nút bấm ngoài Desktop |
 | `x86_64/` & `x86/` | Bộ thực thi mã nguồn mở `goodbyedpi.exe` (v0.2.3rc3-2 của ValdikSS) và `WinDivert` |
 

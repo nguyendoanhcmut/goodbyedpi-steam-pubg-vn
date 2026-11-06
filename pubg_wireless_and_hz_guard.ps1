@@ -93,10 +93,6 @@ function Disable-PubgStartupMovies {
                 }
                 [System.IO.File]::WriteAllText($EngineIniPath, $rawIni, (New-Object System.Text.UTF8Encoding($false)))
             }
-            $attr = [System.IO.File]::GetAttributes($EngineIniPath)
-            if (($attr -band [System.IO.FileAttributes]::ReadOnly) -eq 0) {
-                [System.IO.File]::SetAttributes($EngineIniPath, ($attr -bor [System.IO.FileAttributes]::ReadOnly))
-            }
         } catch {}
     }
 }
@@ -234,7 +230,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if ($isAdmin) {
     Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Cloudflare WARP" -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "CloudflareWARP" -ErrorAction SilentlyContinue
-    foreach ($exeName in @("TslGame.exe", "TslGame_ZK.exe", "TslGame_BE.exe", "ExecPubg.exe")) {
+    foreach ($exeName in @("TslGame.exe", "ExecPubg.exe")) {
         $ifeoPerfPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$exeName\PerfOptions"
         if (-not (Test-Path -LiteralPath $ifeoPerfPath)) {
             New-Item -Path $ifeoPerfPath -Force -ErrorAction SilentlyContinue | Out-Null
@@ -281,12 +277,9 @@ try {
             }
         }
 
-        $launchDetected = $false
-        foreach ($procName in @("ExecPubg", "TslGame_ZK", "TslGame_BE", "TslGame")) {
+        $launchDetected = ([System.Diagnostics.Process]::GetProcessesByName("ExecPubg").Length -gt 0) -or ([System.Diagnostics.Process]::GetProcessesByName("TslGame_ZK").Length -gt 0)
+        foreach ($procName in @("ExecPubg", "TslGame")) {
             $procs = [System.Diagnostics.Process]::GetProcessesByName($procName)
-            if ($procs.Length -gt 0 -and ($procName -eq "ExecPubg" -or $procName -eq "TslGame_ZK")) {
-                $launchDetected = $true
-            }
             foreach ($p in $procs) {
                 try {
                     if ($p.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::Normal) {
