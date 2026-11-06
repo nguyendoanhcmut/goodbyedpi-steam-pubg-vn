@@ -2,11 +2,12 @@ function Set-IniKeyValueInSection {
     param([AllowEmptyString()][string]$Content, [string]$SectionHeader, [string]$Key, [AllowEmptyString()][string]$Value)
     $escapedHeader  = [regex]::Escape($SectionHeader)
     $escapedKey     = [regex]::Escape($Key)
-    $sectionPattern = "(?ms)(^\[$escapedHeader\]\r?\n)(.*?)(?=^\[|\z)"
+    $nextSecLookahead = "(?=^\[(?:/[^\]\r\n]+|ScalabilityGroups|SystemSettings|PacketSimulationSettings|Voice|Audio|Internationalization|[A-Za-z0-9_]+\.[A-Za-z0-9_.]+|[A-Za-z0-9_]+@[0-9]+)\][ \t]*(?:\r?\n|\z)|\z)"
+    $sectionPattern = "(?ms)(^\[$escapedHeader\][ \t]*\r?\n)(.*?)$nextSecLookahead"
     if ($Content -match $sectionPattern) {
         return ([regex]::new($sectionPattern)).Replace($Content, {
             param($m)
-            $hdr        = $m.Groups[1].Value
+            $hdr        = "[$SectionHeader]`r`n"
             $body       = $m.Groups[2].Value
             $keyPattern = "(?m)^(\s*$escapedKey\s*=)[^\r\n]*"
             if ($body -match $keyPattern) {
@@ -20,16 +21,23 @@ function Set-IniKeyValueInSection {
             return ($hdr + $body)
         }, 1)
     }
-    return ($Content.TrimEnd() + "`r`n`r`n[$SectionHeader]`r`n$Key=$Value`r`n")
+    $trimmedContent = if ($null -ne $Content) { $Content.TrimEnd() } else { "" }
+    if ([string]::IsNullOrEmpty($trimmedContent)) {
+        return "[$SectionHeader]`r`n$Key=$Value`r`n"
+    }
+    return ($trimmedContent + "`r`n`r`n[$SectionHeader]`r`n$Key=$Value`r`n")
 }
 
 function Remove-IniSection {
     param([AllowEmptyString()][string]$Content, [string]$SectionHeader)
-    if ([string]::IsNullOrEmpty($Content)) { return "" }
-    $escapedHeader  = [regex]::Escape($SectionHeader)
-    $sectionPattern = "(?ms)^\[$escapedHeader\]\r?\n.*?(?=^\[|\z)"
-    $cleaned        = [regex]::Replace($Content, $sectionPattern, "")
-    return (([regex]::Replace($cleaned, "(\r?\n){3,}", "`r`n`r`n")).Trim() + "`r`n")
+    if ([string]::IsNullOrWhiteSpace($Content)) { return "" }
+    $escapedHeader    = [regex]::Escape($SectionHeader)
+    $nextSecLookahead = "(?=^\[(?:/[^\]\r\n]+|ScalabilityGroups|SystemSettings|PacketSimulationSettings|Voice|Audio|Internationalization|[A-Za-z0-9_]+\.[A-Za-z0-9_.]+|[A-Za-z0-9_]+@[0-9]+)\][ \t]*(?:\r?\n|\z)|\z)"
+    $sectionPattern   = "(?ms)^\[$escapedHeader\][ \t]*\r?\n.*?$nextSecLookahead"
+    $cleaned          = [regex]::Replace($Content, $sectionPattern, "")
+    $trimmed          = ([regex]::Replace($cleaned, "(\r?\n){3,}", "`r`n`r`n")).Trim()
+    if ([string]::IsNullOrEmpty($trimmed)) { return "" }
+    return ($trimmed + "`r`n")
 }
 
 function Optimize-PubgIniFiles {
@@ -74,109 +82,182 @@ function Optimize-PubgIniFiles {
     $engineIni = Join-Path $TargetConfigDir "Engine.ini"
     $gusIni    = Join-Path $TargetConfigDir "GameUserSettings.ini"
     $engineBak = "$engineIni.irisxe.bak"; $gusBak = "$gusIni.irisxe.bak"
+    $attrFile  = Join-Path $TargetConfigDir "irisxe_ini_attrs.json"
     $engineUpdated = $false; $gusUpdated = $false
 
-    if ([System.IO.File]::Exists($engineIni)) {
-        if (-not $IsDryRun) {
-            [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
-            if (-not [System.IO.File]::Exists($engineBak)) {
-                [System.IO.File]::Copy($engineIni, $engineBak, $false)
-                [System.IO.File]::SetAttributes($engineBak, [System.IO.FileAttributes]::Normal)
-            }
-            $rawEngine = [System.IO.File]::ReadAllText($engineIni, [System.Text.Encoding]::UTF8)
-            $rawEngine = Remove-IniSection -Content $rawEngine -SectionHeader "SystemSettings"
-            $rawEngine = Remove-IniSection -Content $rawEngine -SectionHeader "/Script/Engine.RecastNavMesh"
-
-            $movieTable = [ordered]@{ "bWaitForMoviesToComplete" = "False"; "bMoviesAreSkippable" = "True"; "-StartupMovies" = "" }
-            foreach ($kv in $movieTable.GetEnumerator()) {
-                $rawEngine = Set-IniKeyValueInSection -Content $rawEngine -SectionHeader "/Script/MoviePlayer.MoviePlayerSettings" -Key $kv.Key -Value $kv.Value
-            }
-
-            $streamingTable = [ordered]@{
-                "s.AsyncLoadingThreadEnabled"                       = "True"
-                "s.AsyncLoadingTimeLimit"                           = "3.000000"
-                "s.PriorityAsyncLoadingExtraTime"                   = "12.000000"
-                "s.AsyncLoadingUseFullTimeLimit"                    = "False"
-                "s.LevelStreamingActorsUpdateTimeLimit"             = "3.000000"
-                "s.LevelStreamingComponentsRegistrationGranularity" = "5"
-            }
-            foreach ($kv in $streamingTable.GetEnumerator()) {
-                $rawEngine = Set-IniKeyValueInSection -Content $rawEngine -SectionHeader "/Script/Engine.StreamingSettings" -Key $kv.Key -Value $kv.Value
-            }
-            [System.IO.File]::WriteAllText($engineIni, $rawEngine, $utf8NoBom)
-            [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
+    $mtx = $null; $acquired = $false
+    try {
+        try {
+            $mtx = New-Object System.Threading.Mutex($false, "Global\PubgIrisXeIni_Mutex")
+        } catch {
+            $mtx = New-Object System.Threading.Mutex($false, "Local\PubgIrisXeIni_Mutex")
         }
-        $engineUpdated = $true
-    }
+        try { $acquired = $mtx.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
 
-    if ([System.IO.File]::Exists($gusIni)) {
+        $engExists = [System.IO.File]::Exists($engineIni)
+        $gusExists = [System.IO.File]::Exists($gusIni)
+
         if (-not $IsDryRun) {
-            # Clear ReadOnly so PUBG can save user keybinds, mouse sensitivity, and reticle changes on exit.
-            [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
-            if (-not [System.IO.File]::Exists($gusBak)) {
-                [System.IO.File]::Copy($gusIni, $gusBak, $false)
-                [System.IO.File]::SetAttributes($gusBak, [System.IO.FileAttributes]::Normal)
-            }
-            $rawGus = [System.IO.File]::ReadAllText($gusIni, [System.Text.Encoding]::UTF8)
+            $curEngAttr = if ($engExists) { [System.IO.File]::GetAttributes($engineIni) } else { [System.IO.FileAttributes]::Normal }
+            $curGusAttr = if ($gusExists) { [System.IO.File]::GetAttributes($gusIni) } else { [System.IO.FileAttributes]::Normal }
 
-            $engineGusTable = [ordered]@{ "bUseDesiredScreenHeight" = "False"; "GraphicsAPI" = $TargetGraphicsAPI }
-            foreach ($kv in $engineGusTable.GetEnumerator()) {
-                $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "/Script/Engine.GameUserSettings" -Key $kv.Key -Value $kv.Value
-            }
-
-            $hrtfToken = if ($TurnOffHrtf) { "False" } else { "True" }
-            # EFrameRateLimitType reflection tokens in TslGame.exe are Unlimited, Fixed_30, Fixed_60, Customizable, and DisplayBased.
-            $tslGusTable = [ordered]@{
-                "GraphicsAPI"                      = $TargetGraphicsAPI
-                "ScreenScale"                      = $scaleStr
-                "LobbyFrameRateLimitType"          = "Fixed_30"
-                "InGameFrameRateLimitType"         = "Customizable"
-                "InGameCustomFrameRateLimit"       = $fpsStr
-                "FrameRateLimit"                   = $fpsStr
-                "bUseInGameSmoothedFrameRate"      = "False"
-                "bMotionBlur"                      = "False"
-                "bSharpen"                         = "True"
-                "bUseCharacterCapture"             = "False"
-                "bUseClientReplay"                 = "False"
-                "bUseKillCam"                      = "False"
-                "bUseLiveStreaming"                = "False"
-                "bPreloadingMap"                   = "False"
-                "bUseVSync"                        = "False"
-                "bUseDynamicResolution"            = "False"
-                "ResolutionSizeX"                  = "$effectiveResX"
-                "ResolutionSizeY"                  = "$effectiveResY"
-                "LastUserConfirmedResolutionSizeX" = "$effectiveResX"
-                "LastUserConfirmedResolutionSizeY" = "$effectiveResY"
-                "DesiredScreenWidth"               = "$effectiveResX"
-                "DesiredScreenHeight"              = "$effectiveResY"
-                "FullscreenMode"                   = "0"
-                "LastConfirmedFullscreenMode"      = "0"
-                "PreferredFullscreenMode"          = "0"
-                "UpscalingMethod"                  = "None"
-                "GraphicsAPIBeforeFSR"             = "-1"
-                "bIsEnabledHrtfRemoteWeaponSound"  = $hrtfToken
-            }
-            foreach ($kv in $tslGusTable.GetEnumerator()) {
-                $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "/Script/TslGame.TslGameUserSettings" -Key $kv.Key -Value $kv.Value
+            # Pre-verify that neither Engine.ini nor GameUserSettings.ini is locked by another process before creating backups or mutating files.
+            $rawEnginePre = $null
+            $rawGusPre    = $null
+            try {
+                if ($engExists) {
+                    if (($curEngAttr -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                        [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
+                    }
+                    $fsE = [System.IO.File]::Open($engineIni, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                    $fsE.Close(); $fsE.Dispose()
+                    $rawEnginePre = [System.IO.File]::ReadAllText($engineIni, [System.Text.Encoding]::UTF8)
+                }
+                if ($gusExists) {
+                    if (($curGusAttr -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                        [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+                    }
+                    $fsG = [System.IO.File]::Open($gusIni, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                    $fsG.Close(); $fsG.Dispose()
+                    $rawGusPre = [System.IO.File]::ReadAllText($gusIni, [System.Text.Encoding]::UTF8)
+                }
+            } catch {
+                if ($engExists) { try { [System.IO.File]::SetAttributes($engineIni, $curEngAttr) } catch {} }
+                if ($gusExists) { try { [System.IO.File]::SetAttributes($gusIni, $curGusAttr) } catch {} }
+                return [PSCustomObject]@{
+                    EngineUpdated = $false; GusUpdated = $false; AppliedResolutionX = $effectiveResX; AppliedResolutionY = $effectiveResY
+                    AppliedScreenScale = $clampedScale; InternalRenderX = [int][math]::Round(($effectiveResX * $clampedScale) / 100.0); InternalRenderY = [int][math]::Round(($effectiveResY * $clampedScale) / 100.0)
+                }
             }
 
-            # TslPersistantData duplicates bUseKillCam, bUseLiveStreaming, and bIsEnabledHrtfRemoteWeaponSound and overrides top-level keys on load.
-            $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbUseKillCam=)(True|False)', '${1}False')
-            $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbUseLiveStreaming=)(True|False)', '${1}False')
-            $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbIsEnabledHrtfRemoteWeaponSound=)(True|False)', "`${1}$hrtfToken")
-
-            $scalabilityTable = [ordered]@{
-                "sg.ResolutionQuality" = $scaleStr; "sg.ViewDistanceQuality" = "0"; "sg.AntiAliasingQuality" = "0"; "sg.ShadowQuality" = "0"
-                "sg.PostProcessQuality" = "0"; "sg.TextureQuality" = "0"; "sg.EffectsQuality" = "0"; "sg.FoliageQuality" = "0"; "sg.ShadingQuality" = "0"; "sg.VSyncQuality" = "0"
+            $savedAttrs = $null
+            if ([System.IO.File]::Exists($attrFile)) {
+                try { $savedAttrs = [System.IO.File]::ReadAllText($attrFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $savedAttrs = $null }
             }
-            foreach ($kv in $scalabilityTable.GetEnumerator()) {
-                $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "ScalabilityGroups" -Key $kv.Key -Value $kv.Value
+            if ($null -eq $savedAttrs) {
+                $engRo = (($curEngAttr -band [System.IO.FileAttributes]::ReadOnly) -ne 0)
+                $gusRo = (($curGusAttr -band [System.IO.FileAttributes]::ReadOnly) -ne 0)
+                $attrPayload = [ordered]@{
+                    EngineReadOnly   = $engRo
+                    EngineAttributes = [int]$curEngAttr
+                    GusReadOnly      = $gusRo
+                    GusAttributes    = [int]$curGusAttr
+                } | ConvertTo-Json -Compress
+                [System.IO.File]::WriteAllText($attrFile, $attrPayload, $utf8NoBom)
+                $savedAttrs = $attrPayload | ConvertFrom-Json
             }
 
-            [System.IO.File]::WriteAllText($gusIni, $rawGus, $utf8NoBom)
-            [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+            if ($engExists) {
+                [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
+                if (-not [System.IO.File]::Exists($engineBak)) {
+                    [System.IO.File]::Copy($engineIni, $engineBak, $true)
+                    [System.IO.File]::SetAttributes($engineBak, [System.IO.FileAttributes]::Normal)
+                }
+                $rawEngine = $rawEnginePre
+                $rawEngine = Remove-IniSection -Content $rawEngine -SectionHeader "SystemSettings"
+                $rawEngine = Remove-IniSection -Content $rawEngine -SectionHeader "/Script/Engine.RecastNavMesh"
+
+                $movieTable = [ordered]@{ "bWaitForMoviesToComplete" = "False"; "bMoviesAreSkippable" = "True"; "-StartupMovies" = "" }
+                foreach ($kv in $movieTable.GetEnumerator()) {
+                    $rawEngine = Set-IniKeyValueInSection -Content $rawEngine -SectionHeader "/Script/MoviePlayer.MoviePlayerSettings" -Key $kv.Key -Value $kv.Value
+                }
+
+                $streamingTable = [ordered]@{
+                    "s.AsyncLoadingThreadEnabled"                       = "True"
+                    "s.AsyncLoadingTimeLimit"                           = "3.000000"
+                    "s.PriorityAsyncLoadingExtraTime"                   = "12.000000"
+                    "s.AsyncLoadingUseFullTimeLimit"                    = "False"
+                    "s.LevelStreamingActorsUpdateTimeLimit"             = "3.000000"
+                    "s.LevelStreamingComponentsRegistrationGranularity" = "5"
+                }
+                foreach ($kv in $streamingTable.GetEnumerator()) {
+                    $rawEngine = Set-IniKeyValueInSection -Content $rawEngine -SectionHeader "/Script/Engine.StreamingSettings" -Key $kv.Key -Value $kv.Value
+                }
+                [System.IO.File]::WriteAllText($engineIni, $rawEngine, $utf8NoBom)
+                if ($savedAttrs -and $savedAttrs.EngineReadOnly) {
+                    [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]([int]$savedAttrs.EngineAttributes))
+                } else {
+                    [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
+                }
+                $engineUpdated = $true
+            }
+
+            if ($gusExists) {
+                # Clear ReadOnly during gameplay so PUBG can save user keybinds, mouse sensitivity, and reticle changes on exit.
+                [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+                if (-not [System.IO.File]::Exists($gusBak)) {
+                    [System.IO.File]::Copy($gusIni, $gusBak, $true)
+                    [System.IO.File]::SetAttributes($gusBak, [System.IO.FileAttributes]::Normal)
+                }
+                $rawGus = $rawGusPre
+
+                $engineGusTable = [ordered]@{ "bUseDesiredScreenHeight" = "False"; "GraphicsAPI" = $TargetGraphicsAPI }
+                foreach ($kv in $engineGusTable.GetEnumerator()) {
+                    $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "/Script/Engine.GameUserSettings" -Key $kv.Key -Value $kv.Value
+                }
+
+                $hrtfToken = if ($TurnOffHrtf) { "False" } else { "True" }
+                # EFrameRateLimitType reflection tokens in TslGame.exe are Unlimited, Fixed_30, Fixed_60, Customizable, and DisplayBased.
+                $tslGusTable = [ordered]@{
+                    "GraphicsAPI"                      = $TargetGraphicsAPI
+                    "ScreenScale"                      = $scaleStr
+                    "LobbyFrameRateLimitType"          = "Fixed_30"
+                    "InGameFrameRateLimitType"         = "Customizable"
+                    "InGameCustomFrameRateLimit"       = $fpsStr
+                    "FrameRateLimit"                   = $fpsStr
+                    "bUseInGameSmoothedFrameRate"      = "False"
+                    "bMotionBlur"                      = "False"
+                    "bSharpen"                         = "True"
+                    "bUseCharacterCapture"             = "False"
+                    "bUseClientReplay"                 = "False"
+                    "bUseKillCam"                      = "False"
+                    "bUseLiveStreaming"                = "False"
+                    "bPreloadingMap"                   = "False"
+                    "bUseVSync"                        = "False"
+                    "bUseDynamicResolution"            = "False"
+                    "ResolutionSizeX"                  = "$effectiveResX"
+                    "ResolutionSizeY"                  = "$effectiveResY"
+                    "LastUserConfirmedResolutionSizeX" = "$effectiveResX"
+                    "LastUserConfirmedResolutionSizeY" = "$effectiveResY"
+                    "DesiredScreenWidth"               = "$effectiveResX"
+                    "DesiredScreenHeight"              = "$effectiveResY"
+                    "FullscreenMode"                   = "0"
+                    "LastConfirmedFullscreenMode"      = "0"
+                    "PreferredFullscreenMode"          = "0"
+                    "UpscalingMethod"                  = "None"
+                    "GraphicsAPIBeforeFSR"             = "-1"
+                    "bIsEnabledHrtfRemoteWeaponSound"  = $hrtfToken
+                }
+                foreach ($kv in $tslGusTable.GetEnumerator()) {
+                    $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "/Script/TslGame.TslGameUserSettings" -Key $kv.Key -Value $kv.Value
+                }
+
+                # TslPersistantData duplicates bUseKillCam, bUseLiveStreaming, and bIsEnabledHrtfRemoteWeaponSound and overrides top-level keys on load.
+                $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbUseKillCam=)(True|False)', '${1}False')
+                $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbUseLiveStreaming=)(True|False)', '${1}False')
+                $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbIsEnabledHrtfRemoteWeaponSound=)(True|False)', "`${1}$hrtfToken")
+
+                $scalabilityTable = [ordered]@{
+                    "sg.ResolutionQuality" = $scaleStr; "sg.ViewDistanceQuality" = "0"; "sg.AntiAliasingQuality" = "0"; "sg.ShadowQuality" = "0"
+                    "sg.PostProcessQuality" = "0"; "sg.TextureQuality" = "0"; "sg.EffectsQuality" = "0"; "sg.FoliageQuality" = "0"; "sg.ShadingQuality" = "0"; "sg.VSyncQuality" = "0"
+                }
+                foreach ($kv in $scalabilityTable.GetEnumerator()) {
+                    $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "ScalabilityGroups" -Key $kv.Key -Value $kv.Value
+                }
+
+                [System.IO.File]::WriteAllText($gusIni, $rawGus, $utf8NoBom)
+                [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+                $gusUpdated = $true
+            }
+        } else {
+            if ($engExists) { $engineUpdated = $true }
+            if ($gusExists) { $gusUpdated = $true }
         }
-        $gusUpdated = $true
+    } finally {
+        if ($null -ne $mtx) {
+            try { if ($acquired) { $mtx.ReleaseMutex() } } catch {}
+            try { $mtx.Dispose() } catch {}
+        }
     }
 
     return [PSCustomObject]@{
@@ -191,89 +272,212 @@ function Restore-PubgIniFiles {
     $gusIni    = Join-Path $TargetConfigDir "GameUserSettings.ini"
     $engineBak = "$engineIni.irisxe.bak"
     $gusBak    = "$gusIni.irisxe.bak"
+    $attrFile  = Join-Path $TargetConfigDir "irisxe_ini_attrs.json"
     $engineRestored = $false
     $gusRestored    = $false
 
-    if ([System.IO.File]::Exists($engineBak)) {
-        if (-not $IsDryRun) {
-            if ([System.IO.File]::Exists($engineIni)) { [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal) }
-            [System.IO.File]::Copy($engineBak, $engineIni, $true)
-            [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
-            [System.IO.File]::Delete($engineBak)
+    $mtx = $null; $acquired = $false
+    try {
+        try {
+            $mtx = New-Object System.Threading.Mutex($false, "Global\PubgIrisXeIni_Mutex")
+        } catch {
+            $mtx = New-Object System.Threading.Mutex($false, "Local\PubgIrisXeIni_Mutex")
         }
-        $engineRestored = $true
-    } elseif ([System.IO.File]::Exists($engineIni) -and -not $IsDryRun) {
-        [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
-    }
+        try { $acquired = $mtx.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
 
-    if ([System.IO.File]::Exists($gusBak)) {
-        if (-not $IsDryRun) {
-            $liveGus = if ([System.IO.File]::Exists($gusIni)) { [System.IO.File]::ReadAllText($gusIni, [System.Text.Encoding]::UTF8) } else { "" }
-            $bakGus  = [System.IO.File]::ReadAllText($gusBak, [System.Text.Encoding]::UTF8)
-            if ([System.IO.File]::Exists($gusIni)) { [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal) }
-            [System.IO.File]::Copy($gusBak, $gusIni, $true)
-            if (-not [string]::IsNullOrEmpty($liveGus)) {
-                $changed  = $false
-                $prefKeys = @("CustomInputSettins", "DefaultReticleBrightnessMap", "RifleCrosshairSettings", "ShotgunCrosshairSettings", "PistolCrosshairSettings", "ThrowableCrosshairSettings")
-                foreach ($pk in $prefKeys) {
-                    if ($liveGus -match "(?m)^(?<ln>$pk=[^\r\n]*)") {
-                        $liveLine = $Matches['ln']
-                        if ($bakGus -match "(?m)^(?<bln>$pk=[^\r\n]*)" -and $Matches['bln'] -cne $liveLine) {
-                            $bakGus  = [regex]::Replace($bakGus, "(?m)^$pk=[^\r\n]*", $liveLine.Replace('$', '$$'))
-                            $changed = $true
-                        }
-                    }
-                }
-                if ($liveGus -match "(?m)^(?<ltp>TslPersistantData=[^\r\n]*)") {
-                    $liveTp = $Matches['ltp']
-                    if ($bakGus -match "(?m)^(?<btp>TslPersistantData=[^\r\n]*)") {
-                        $bakTp = $Matches['btp']
-                        if ($bakTp -match '(?i)\bbUseKillCam=(?<kc>True|False)') { $liveTp = [regex]::Replace($liveTp, '(?i)(\bbUseKillCam=)(True|False)', "`${1}$($Matches['kc'])") }
-                        if ($bakTp -match '(?i)\bbUseLiveStreaming=(?<ls>True|False)') { $liveTp = [regex]::Replace($liveTp, '(?i)(\bbUseLiveStreaming=)(True|False)', "`${1}$($Matches['ls'])") }
-                        if ($bakTp -match '(?i)\bbIsEnabledHrtfRemoteWeaponSound=(?<hr>True|False)') { $liveTp = [regex]::Replace($liveTp, '(?i)(\bbIsEnabledHrtfRemoteWeaponSound=)(True|False)', "`${1}$($Matches['hr'])") }
-                        if ($liveTp -cne $bakTp) {
-                            $bakGus  = [regex]::Replace($bakGus, "(?m)^TslPersistantData=[^\r\n]*", $liveTp.Replace('$', '$$'))
-                            $changed = $true
-                        }
-                    }
-                }
-                if ($changed) {
-                    [System.IO.File]::WriteAllText($gusIni, $bakGus, (New-Object System.Text.UTF8Encoding($false)))
+        $savedAttrs = $null
+        if ([System.IO.File]::Exists($attrFile)) {
+            try { $savedAttrs = [System.IO.File]::ReadAllText($attrFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $savedAttrs = $null }
+        }
+
+        if ([System.IO.File]::Exists($engineBak)) {
+            if (-not $IsDryRun) {
+                [System.IO.File]::SetAttributes($engineBak, [System.IO.FileAttributes]::Normal)
+                if ([System.IO.File]::Exists($engineIni)) { [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal) }
+                [System.IO.File]::Copy($engineBak, $engineIni, $true)
+                [System.IO.File]::Delete($engineBak)
+                if ($savedAttrs -and $savedAttrs.EngineReadOnly) {
+                    [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]([int]$savedAttrs.EngineAttributes))
+                } else {
+                    [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
                 }
             }
-            [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
-            [System.IO.File]::Delete($gusBak)
+            $engineRestored = $true
+        } elseif ([System.IO.File]::Exists($engineIni) -and -not $IsDryRun) {
+            if ($savedAttrs -and $savedAttrs.EngineReadOnly) {
+                [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]([int]$savedAttrs.EngineAttributes))
+            } else {
+                [System.IO.File]::SetAttributes($engineIni, [System.IO.FileAttributes]::Normal)
+            }
         }
-        $gusRestored = $true
-    } elseif ([System.IO.File]::Exists($gusIni) -and -not $IsDryRun) {
-        [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+
+        if ([System.IO.File]::Exists($gusBak)) {
+            if (-not $IsDryRun) {
+                [System.IO.File]::SetAttributes($gusBak, [System.IO.FileAttributes]::Normal)
+                if ([System.IO.File]::Exists($gusIni)) { [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal) }
+                $liveGus = if ([System.IO.File]::Exists($gusIni)) { [System.IO.File]::ReadAllText($gusIni, [System.Text.Encoding]::UTF8) } else { "" }
+                $bakGus  = [System.IO.File]::ReadAllText($gusBak, [System.Text.Encoding]::UTF8)
+                [System.IO.File]::Copy($gusBak, $gusIni, $true)
+                [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+                if (-not [string]::IsNullOrEmpty($liveGus)) {
+                    $changed  = $false
+                    $prefKeys = @(
+                        "CustomInputSettins", "DefaultReticleBrightnessMap", "RifleCrosshairSettings",
+                        "ShotgunCrosshairSettings", "PistolCrosshairSettings", "ThrowableCrosshairSettings",
+                        "FpsCameraFov", "CrosshairColorString", "CustomReticleColor", "MouseSensitiveList"
+                    )
+                    foreach ($pk in $prefKeys) {
+                        if ($liveGus -match "(?m)^(?<ln>$pk=[^\r\n]*)") {
+                            $liveLine = $Matches['ln'].TrimEnd("`r")
+                            if ($bakGus -match "(?m)^(?<bln>$pk=[^\r\n]*)") {
+                                $bakLine = $Matches['bln'].TrimEnd("`r")
+                                if ($bakLine -cne $liveLine) {
+                                    $bakGus  = [regex]::Replace($bakGus, "(?m)^$pk=[^\r\n]*", $liveLine.Replace('$', '$$'))
+                                    $changed = $true
+                                }
+                            } else {
+                                $valPart = $liveLine.Substring($pk.Length + 1)
+                                $bakGus  = Set-IniKeyValueInSection -Content $bakGus -SectionHeader "/Script/TslGame.TslGameUserSettings" -Key $pk -Value $valPart
+                                $changed = $true
+                            }
+                        }
+                    }
+                    foreach ($multiKey in @("ActionMappings", "AxisMappings")) {
+                        $liveMulti = @([regex]::Matches($liveGus, "(?m)^$multiKey=[^\r\n]*") | ForEach-Object { $_.Value.TrimEnd("`r") })
+                        $bakMulti  = @([regex]::Matches($bakGus, "(?m)^$multiKey=[^\r\n]*") | ForEach-Object { $_.Value.TrimEnd("`r") })
+                        if (($liveMulti -join "`n") -cne ($bakMulti -join "`n")) {
+                            $bakGus = [regex]::Replace($bakGus, "(?m)^$multiKey=[^\r\n]*\r?\n?", "")
+                            if ($liveMulti.Count -gt 0) {
+                                $multiBlock = ($liveMulti -join "`r`n")
+                                if ($bakGus -match "(?m)^\[ScalabilityGroups\]") {
+                                    $safeBlock = ($multiBlock + "`r`n`r`n[ScalabilityGroups]").Replace('$', '$$')
+                                    $bakGus = [regex]::Replace($bakGus, "(?m)^\[ScalabilityGroups\]", $safeBlock, 1)
+                                } else {
+                                    $bakGus = $bakGus.TrimEnd() + "`r`n" + $multiBlock + "`r`n"
+                                }
+                            }
+                            $changed = $true
+                        }
+                    }
+                    if ($liveGus -match "(?m)^(?<ltp>TslPersistantData=[^\r\n]*)") {
+                        $liveTp = $Matches['ltp'].TrimEnd("`r")
+                        if ($bakGus -match "(?m)^(?<btp>TslPersistantData=[^\r\n]*)") {
+                            $bakTp = $Matches['btp'].TrimEnd("`r")
+                            if ($bakTp -match '(?i)\bbUseKillCam=(?<kc>True|False)') { $liveTp = [regex]::Replace($liveTp, '(?i)(\bbUseKillCam=)(True|False)', "`${1}$($Matches['kc'])") }
+                            if ($bakTp -match '(?i)\bbUseLiveStreaming=(?<ls>True|False)') { $liveTp = [regex]::Replace($liveTp, '(?i)(\bbUseLiveStreaming=)(True|False)', "`${1}$($Matches['ls'])") }
+                            if ($bakTp -match '(?i)\bbIsEnabledHrtfRemoteWeaponSound=(?<hr>True|False)') { $liveTp = [regex]::Replace($liveTp, '(?i)(\bbIsEnabledHrtfRemoteWeaponSound=)(True|False)', "`${1}$($Matches['hr'])") }
+                            if ($liveTp -cne $bakTp) {
+                                $bakGus  = [regex]::Replace($bakGus, "(?m)^TslPersistantData=[^\r\n]*", $liveTp.Replace('$', '$$'))
+                                $changed = $true
+                            }
+                        }
+                    }
+                    if ($changed) {
+                        [System.IO.File]::WriteAllText($gusIni, $bakGus, (New-Object System.Text.UTF8Encoding($false)))
+                    }
+                }
+                [System.IO.File]::Delete($gusBak)
+                if ($savedAttrs -and $savedAttrs.GusReadOnly) {
+                    [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]([int]$savedAttrs.GusAttributes))
+                } else {
+                    [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+                }
+            }
+            $gusRestored = $true
+        } elseif ([System.IO.File]::Exists($gusIni) -and -not $IsDryRun) {
+            if ($savedAttrs -and $savedAttrs.GusReadOnly) {
+                [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]([int]$savedAttrs.GusAttributes))
+            } else {
+                [System.IO.File]::SetAttributes($gusIni, [System.IO.FileAttributes]::Normal)
+            }
+        }
+
+        if (-not $IsDryRun -and [System.IO.File]::Exists($attrFile)) {
+            try {
+                [System.IO.File]::SetAttributes($attrFile, [System.IO.FileAttributes]::Normal)
+                [System.IO.File]::Delete($attrFile)
+            } catch {}
+        }
+    } finally {
+        if ($null -ne $mtx) {
+            try { if ($acquired) { $mtx.ReleaseMutex() } } catch {}
+            try { $mtx.Dispose() } catch {}
+        }
     }
 
     return [PSCustomObject]@{ EngineRestored = $engineRestored; GusRestored = $gusRestored }
 }
 
 function Measure-PubgDemosFolder {
-    param([bool]$RemoveOldDemos = $false, [bool]$IsDryRun = ([bool](Get-Variable -Name DryRun -ValueOnly -ErrorAction SilentlyContinue)), [string]$DemosDir = (Join-Path $env:LOCALAPPDATA "TslGame\Saved\Demos"))
+    param(
+        [Alias("CleanOldDemos")][bool]$RemoveOldDemos = $false,
+        [int]$MaxToKeep = 20,
+        [bool]$IsDryRun = ([bool](Get-Variable -Name DryRun -ValueOnly -ErrorAction SilentlyContinue)),
+        [string]$DemosDir = (Join-Path $env:LOCALAPPDATA "TslGame\Saved\Demos")
+    )
     if (-not (Test-Path -LiteralPath $DemosDir)) {
-        return [PSCustomObject]@{ MatchCount = 0; FileCount = 0; SizeMB = 0.0; Cleaned = $false }
+        return [PSCustomObject]@{ MatchCount = 0; FileCount = 0; SizeMB = 0.0; Cleaned = $false; RemovedCount = 0 }
     }
-    $matchDirs = @(Get-ChildItem -LiteralPath $DemosDir -Directory -ErrorAction SilentlyContinue)
-    $allFiles  = @(Get-ChildItem -LiteralPath $DemosDir -Recurse -File -ErrorAction SilentlyContinue)
-    $bytes     = ($allFiles | Measure-Object Length -Sum).Sum
-    $sizeMB    = if ($bytes -gt 0) { [math]::Round($bytes / 1MB, 2) } else { 0.0 }
-    $cleaned   = $false
+    $matchDirs    = @(Get-ChildItem -LiteralPath $DemosDir -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
+    $allFiles     = @(Get-ChildItem -LiteralPath $DemosDir -Recurse -File -ErrorAction SilentlyContinue)
+    $bytes        = ($allFiles | Measure-Object Length -Sum).Sum
+    $sizeMB       = if ($bytes -gt 0) { [math]::Round($bytes / 1MB, 2) } else { 0.0 }
+    $cleaned      = $false
+    $removedCount = 0
     if ($RemoveOldDemos -and -not $IsDryRun -and $matchDirs.Count -gt 0) {
+        $cutoffUtc = [DateTime]::UtcNow.AddDays(-14)
+        $unpinnedRecentCount = 0
         foreach ($md in $matchDirs) {
-            try { Remove-Item -LiteralPath $md.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            $riFiles = @(Get-ChildItem -LiteralPath $md.FullName -Filter "*.replayinfo" -File -Force -ErrorAction SilentlyContinue)
+            $isPinned = $false
+            $riLocked = $false
+            foreach ($riFile in $riFiles) {
+                try {
+                    $fsRi = [System.IO.File]::Open($riFile.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    $srRi = New-Object System.IO.StreamReader($fsRi, [System.Text.Encoding]::UTF8)
+                    $riRaw = $srRi.ReadToEnd()
+                    $srRi.Close(); $fsRi.Close()
+                    if ($riRaw -match '"bShouldKeep"\s*:\s*true') { $isPinned = $true }
+                } catch {
+                    $riLocked = $true
+                }
+            }
+            if ($isPinned -or $riLocked) { continue }
+            if ($md.LastWriteTimeUtc -ge $cutoffUtc -and $riFiles.Count -gt 0) {
+                $unpinnedRecentCount++
+                if ($unpinnedRecentCount -le $MaxToKeep) { continue }
+            }
+            $innerFiles = @(Get-ChildItem -LiteralPath $md.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)
+            $anyLocked = $false
+            foreach ($inf in $innerFiles) {
+                try {
+                    if (($inf.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                        [System.IO.File]::SetAttributes($inf.FullName, [System.IO.FileAttributes]::Normal)
+                    }
+                    $fs = [System.IO.File]::Open($inf.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                    $fs.Close(); $fs.Dispose()
+                } catch {
+                    $anyLocked = $true
+                    break
+                }
+            }
+            if (-not $anyLocked) {
+                try {
+                    Remove-Item -LiteralPath $md.FullName -Recurse -Force -ErrorAction Stop
+                    $cleaned = $true
+                    $removedCount++
+                } catch {}
+            }
         }
-        $cleaned = $true
     }
-    return [PSCustomObject]@{ MatchCount = $matchDirs.Count; FileCount = $allFiles.Count; SizeMB = $sizeMB; Cleaned = $cleaned }
+    return [PSCustomObject]@{ MatchCount = $matchDirs.Count; FileCount = $allFiles.Count; SizeMB = $sizeMB; Cleaned = $cleaned; RemovedCount = $removedCount }
 }
 
 function Clear-StaleDxShaderCacheSafely {
     param([bool]$ForceRebuild = $false, [bool]$IsDryRun = ([bool](Get-Variable -Name DryRun -ValueOnly -ErrorAction SilentlyContinue)))
-    if ([System.Diagnostics.Process]::GetProcessesByName("TslGame").Length -gt 0) {
+    $tslProcs = @([System.Diagnostics.Process]::GetProcessesByName("TslGame"))
+    foreach ($tp in $tslProcs) { $tp.Dispose() }
+    if ($tslProcs.Count -gt 0) {
         return [PSCustomObject]@{ DeletedFiles = 0; SkippedLocked = 0; BytesFreed = 0L }
     }
     $dirs = @(

@@ -54,7 +54,13 @@ function Get-RegistrySpecTable {
         @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"; Name = "DisablePagingExecutive"; Value = 1; Type = "DWord" },
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Search\Gather\Windows\SystemIndex"; Name = "RespectPowerModes"; Type = "DWord"; Value = 1 }
     )
-    $pubgWin64Dir = "C:\Program Files (x86)\Steam\steamapps\common\PUBG\TslGame\Binaries\Win64"
+    $pubgBaseDir = if (Get-Command Resolve-SteamPubgInstallDir -ErrorAction SilentlyContinue) {
+        Resolve-SteamPubgInstallDir
+    } else {
+        $pf86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }
+        Join-Path (Join-Path $pf86 "Steam") "steamapps\common\PUBG"
+    }
+    $pubgWin64Dir = Join-Path $pubgBaseDir "TslGame\Binaries\Win64"
     foreach ($gpuExe in @("TslGame.exe", "ExecPubg.exe", "TslGame_BE.exe", "TslGame_ZK.exe")) {
         $specs += @{ Path = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"; Name = (Join-Path $pubgWin64Dir $gpuExe); Value = "GpuPreference=2;"; Type = "String" }
     }
@@ -183,6 +189,156 @@ function Get-RegistryValueSnapshot {
     }
 }
 
+function Merge-RegistryValueSnapshots {
+    param([object[]]$ExistingSnapshots = @(), [object[]]$RegistrySpecs = @(), [object[]]$IfeoSpecs = @())
+    $merged = New-Object System.Collections.Generic.List[object]
+    $seenKeys = @{}
+    if ($null -ne $ExistingSnapshots) {
+        foreach ($snap in $ExistingSnapshots) {
+            if ($null -ne $snap -and $snap.Path -and $snap.Name) {
+                $k = "$($snap.Path)|$($snap.Name)"
+                if (-not $seenKeys.ContainsKey($k)) {
+                    $seenKeys[$k] = $true
+                    $merged.Add($snap)
+                }
+            }
+        }
+    }
+    if ($null -ne $RegistrySpecs) {
+        foreach ($rSpec in $RegistrySpecs) {
+            if ($null -eq $rSpec -or -not $rSpec.Path -or -not $rSpec.Name) { continue }
+            $k = "$($rSpec.Path)|$($rSpec.Name)"
+            if (-not $seenKeys.ContainsKey($k)) {
+                $seenKeys[$k] = $true
+                $merged.Add((Get-RegistryValueSnapshot -Path $rSpec.Path -Name $rSpec.Name))
+            }
+        }
+    }
+    if ($null -ne $IfeoSpecs) {
+        foreach ($ifeo in $IfeoSpecs) {
+            if ($null -eq $ifeo -or -not $ifeo.Exe) { continue }
+            $ifeoPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$($ifeo.Exe)\PerfOptions"
+            foreach ($propName in @("CpuPriorityClass", "IoPriority", "PagePriority")) {
+                $k = "$ifeoPath|$propName"
+                if (-not $seenKeys.ContainsKey($k)) {
+                    $seenKeys[$k] = $true
+                    $merged.Add((Get-RegistryValueSnapshot -Path $ifeoPath -Name $propName))
+                }
+            }
+        }
+    }
+    return $merged.ToArray()
+}
+
+function Read-BoostStateSafely {
+    param([string]$StateFilePath)
+    if ([string]::IsNullOrWhiteSpace($StateFilePath)) { return $null }
+    foreach ($candidate in @($StateFilePath, "$StateFilePath.bak")) {
+        if (Test-Path -LiteralPath $candidate) {
+            try {
+                $parsed = Get-Content -LiteralPath $candidate -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ($null -ne $parsed -and $null -ne $parsed.Registry) { return $parsed }
+            } catch {}
+        }
+    }
+    return $null
+}
+
+function Write-BoostStateAtomically {
+    param([string]$StateFilePath, [object]$StateObject, [bool]$IsDryRun = $false)
+    if ($IsDryRun -or [string]::IsNullOrWhiteSpace($StateFilePath) -or $null -eq $StateObject) { return }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $mtx = $null; $acquired = $false
+    try {
+        try {
+            $mtx = New-Object System.Threading.Mutex($false, "Global\PubgIrisXeState_Mutex")
+        } catch {
+            $mtx = New-Object System.Threading.Mutex($false, "Local\PubgIrisXeState_Mutex")
+        }
+        try { $acquired = $mtx.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+
+        $parentDir = Split-Path -Path $StateFilePath -Parent
+        if ($parentDir -and -not (Test-Path -LiteralPath $parentDir)) { New-Item -ItemType Directory -Path $parentDir -Force | Out-Null }
+
+        $existingOnDisk = Read-BoostStateSafely -StateFilePath $StateFilePath
+        if ($null -ne $existingOnDisk) {
+            if ($null -ne $existingOnDisk.Registry -and @($existingOnDisk.Registry).Count -gt 0) {
+                $mergedReg = New-Object System.Collections.Generic.List[object]
+                $seenReg = @{}
+                foreach ($er in @($existingOnDisk.Registry)) {
+                    if ($null -ne $er -and $er.Path -and $er.Name) {
+                        $rk = "$($er.Path)|$($er.Name)"
+                        if (-not $seenReg.ContainsKey($rk)) { $seenReg[$rk] = $true; $mergedReg.Add($er) }
+                    }
+                }
+                if ($null -ne $StateObject.Registry) {
+                    foreach ($nr in @($StateObject.Registry)) {
+                        if ($null -ne $nr -and $nr.Path -and $nr.Name) {
+                            $rk = "$($nr.Path)|$($nr.Name)"
+                            if (-not $seenReg.ContainsKey($rk)) { $seenReg[$rk] = $true; $mergedReg.Add($nr) }
+                        }
+                    }
+                }
+                $StateObject.Registry = $mergedReg.ToArray()
+            }
+            if ($null -ne $existingOnDisk.Services -and @($existingOnDisk.Services).Count -gt 0) {
+                $mergedSvc = New-Object System.Collections.Generic.List[object]
+                $seenSvc = @{}
+                foreach ($es in @($existingOnDisk.Services)) {
+                    if ($null -ne $es -and $es.Name -and -not $seenSvc.ContainsKey($es.Name)) {
+                        $seenSvc[$es.Name] = $true; $mergedSvc.Add($es)
+                    }
+                }
+                if ($null -ne $StateObject.Services) {
+                    foreach ($ns in @($StateObject.Services)) {
+                        if ($null -ne $ns -and $ns.Name -and -not $seenSvc.ContainsKey($ns.Name)) {
+                            $seenSvc[$ns.Name] = $true; $mergedSvc.Add($ns)
+                        }
+                    }
+                }
+                $StateObject.Services = $mergedSvc.ToArray()
+            }
+            if ($null -ne $existingOnDisk.PinnedProcesses -and @($existingOnDisk.PinnedProcesses).Count -gt 0) {
+                $mergedPin = New-Object System.Collections.Generic.List[object]
+                $seenPin = @{}
+                foreach ($ep in @($existingOnDisk.PinnedProcesses)) {
+                    if ($null -ne $ep -and $null -ne $ep.Id) {
+                        $pk = "$($ep.Id):$($ep.ProcessName)"
+                        if (-not $seenPin.ContainsKey($pk)) { $seenPin[$pk] = $true; $mergedPin.Add($ep) }
+                    }
+                }
+                if ($null -ne $StateObject.PinnedProcesses) {
+                    foreach ($np in @($StateObject.PinnedProcesses)) {
+                        if ($null -ne $np -and $null -ne $np.Id) {
+                            $pk = "$($np.Id):$($np.ProcessName)"
+                            if (-not $seenPin.ContainsKey($pk)) { $seenPin[$pk] = $true; $mergedPin.Add($np) }
+                        }
+                    }
+                }
+                $StateObject.PinnedProcesses = $mergedPin.ToArray()
+            }
+        }
+
+        $jsonPayload = $StateObject | ConvertTo-Json -Depth 6
+        $tmpPath = "$StateFilePath.tmp.$PID"
+        try {
+            [System.IO.File]::WriteAllText($tmpPath, $jsonPayload, $utf8NoBom)
+            if (Test-Path -LiteralPath $StateFilePath) { [System.IO.File]::SetAttributes($StateFilePath, [System.IO.FileAttributes]::Normal) }
+            [System.IO.File]::Copy($tmpPath, $StateFilePath, $true)
+            $bakPath = "$StateFilePath.bak"
+            if (Test-Path -LiteralPath $bakPath) { [System.IO.File]::SetAttributes($bakPath, [System.IO.FileAttributes]::Normal) }
+            [System.IO.File]::Copy($tmpPath, $bakPath, $true)
+        } finally {
+            if ([System.IO.File]::Exists($tmpPath)) { try { [System.IO.File]::Delete($tmpPath) } catch {} }
+        }
+    } finally {
+        if ($null -ne $mtx) {
+            try { if ($acquired) { $mtx.ReleaseMutex() } } catch {}
+            try { $mtx.Dispose() } catch {}
+        }
+    }
+}
+
 function Set-RegistryValueSafely {
     param([string]$Path, [string]$Name, [object]$Value, [string]$Type, [bool]$IsDryRun = $false)
     if ($IsDryRun) { return $true }
@@ -201,27 +357,43 @@ function Set-RegistryValueSafely {
 
 function Restore-RegistryValueSnapshot {
     param([object]$Snap, [bool]$IsDryRun = $false)
-    if ($IsDryRun -or $null -eq $Snap) { return }
+    if ($IsDryRun -or $null -eq $Snap) { return $true }
     try {
         if (-not $Snap.KeyExisted) {
-            if (Test-Path -LiteralPath $Snap.Path) { Remove-Item -LiteralPath $Snap.Path -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $Snap.Path) {
+                $kItemBefore = Get-Item -LiteralPath $Snap.Path -ErrorAction Stop
+                if ($Snap.Name -and ($null -ne $kItemBefore.GetValue($Snap.Name, $null))) {
+                    Remove-ItemProperty -LiteralPath $Snap.Path -Name $Snap.Name -Force -ErrorAction Stop
+                }
+                $kItem = Get-Item -LiteralPath $Snap.Path -ErrorAction Stop
+                if ($null -ne $kItem -and $kItem.SubKeyCount -eq 0 -and $kItem.ValueCount -eq 0) {
+                    Remove-Item -LiteralPath $Snap.Path -Force -ErrorAction Stop
+                }
+            }
             $parentPath = if ($Snap.PSObject.Properties['ParentPath'] -and $Snap.ParentPath) { [string]$Snap.ParentPath } else { Split-Path -Path $Snap.Path -Parent }
             $parentExisted = if ($Snap.PSObject.Properties['ParentKeyExisted'] -and $null -ne $Snap.ParentKeyExisted) { [bool]$Snap.ParentKeyExisted } else { $true }
             if ((-not $parentExisted) -and $parentPath -and (Test-Path -LiteralPath $parentPath)) {
-                $pItem = Get-Item -LiteralPath $parentPath -ErrorAction SilentlyContinue
+                $pItem = Get-Item -LiteralPath $parentPath -ErrorAction Stop
                 if ($null -ne $pItem -and $pItem.SubKeyCount -eq 0 -and $pItem.ValueCount -eq 0) {
-                    Remove-Item -LiteralPath $parentPath -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $parentPath -Force -ErrorAction Stop
                 }
             }
-            return
+            return $true
         }
         if (-not $Snap.ValueExisted) {
-            if (Test-Path -LiteralPath $Snap.Path) { Remove-ItemProperty -LiteralPath $Snap.Path -Name $Snap.Name -Force -ErrorAction SilentlyContinue }
-            return
+            if (Test-Path -LiteralPath $Snap.Path) {
+                $kItem = Get-Item -LiteralPath $Snap.Path -ErrorAction Stop
+                if ($null -ne $kItem.GetValue($Snap.Name, $null)) {
+                    Remove-ItemProperty -LiteralPath $Snap.Path -Name $Snap.Name -Force -ErrorAction Stop
+                }
+            }
+            return $true
         }
         $kind = if ($Snap.Kind) { [string]$Snap.Kind } else { "DWord" }
-        Set-RegistryValueSafely -Path $Snap.Path -Name $Snap.Name -Value $Snap.Value -Type $kind -IsDryRun $IsDryRun | Out-Null
-    } catch {}
+        return (Set-RegistryValueSafely -Path $Snap.Path -Name $Snap.Name -Value $Snap.Value -Type $kind -IsDryRun $IsDryRun)
+    } catch {
+        return $false
+    }
 }
 
 function Clear-PubgFaultTolerantHeapShim {
@@ -247,6 +419,28 @@ function Clear-PubgFaultTolerantHeapShim {
     return [PSCustomObject]@{ ClearedCount = $removed.Count; Entries = $removed }
 }
 
+function Get-RunningTelemetryServicesSnapshot {
+    param([object[]]$ExistingServices = @())
+    $stoppedServices = @()
+    if ($null -ne $ExistingServices) { foreach ($item in $ExistingServices) { if ($null -ne $item) { $stoppedServices += $item } } }
+    foreach ($svcName in $SuspendableTelemetryServices) {
+        if ($ProtectedThermalServices -contains $svcName) { continue }
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($null -ne $svc -and $svc.Status -eq "Running") {
+            if (-not ($stoppedServices | Where-Object { $_.Name -eq $svc.Name })) {
+                $stoppedServices += [ordered]@{ Name = $svc.Name; StartType = [string]$svc.StartType; WasRunning = $true }
+            }
+        }
+    }
+    $ddmProcs = @(Get-Process -Name "ddm" -ErrorAction SilentlyContinue)
+    $ddmPath = $null
+    if ($ddmProcs.Count -gt 0) {
+        try { $ddmPath = $ddmProcs[0].Path } catch {}
+    }
+    foreach ($dp in $ddmProcs) { $dp.Dispose() }
+    return [PSCustomObject]@{ Services = $stoppedServices; DdmPath = $ddmPath }
+}
+
 function Suspend-TelemetryServicesSafely {
     param([object[]]$ExistingServices = @(), [bool]$IsAdmin = $false, [bool]$IsDryRun = $false)
     $stoppedServices = @()
@@ -265,21 +459,19 @@ function Suspend-TelemetryServicesSafely {
             }
         }
     }
-    $ddmProc = Get-Process -Name "ddm" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $ddmProcs = @(Get-Process -Name "ddm" -ErrorAction SilentlyContinue)
     $ddmPath = $null
-    if ($null -ne $ddmProc) {
-        try { $ddmPath = $ddmProc.Path } catch {}
-        if (-not $IsDryRun) { Stop-Process -Id $ddmProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($ddmProcs.Count -gt 0) {
+        try { $ddmPath = $ddmProcs[0].Path } catch {}
+        if (-not $IsDryRun) { Stop-Process -Id $ddmProcs[0].Id -Force -ErrorAction SilentlyContinue }
     }
+    foreach ($dp in $ddmProcs) { $dp.Dispose() }
     return [PSCustomObject]@{ Services = $stoppedServices; DdmPath = $ddmPath }
 }
 
 function Restore-SessionRuntimeState {
     param([string]$StateFilePath, [bool]$IsDryRun = $false)
-    $saved = $null
-    if ($StateFilePath -and (Test-Path -LiteralPath $StateFilePath)) {
-        try { $saved = Get-Content -LiteralPath $StateFilePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $saved = $null }
-    }
+    $saved = Read-BoostStateSafely -StateFilePath $StateFilePath
     $origScheme  = if ($saved -and $saved.Power -and $saved.Power.ActiveScheme) { [string]$saved.Power.ActiveScheme } else { $BalancedSchemeGuid }
     $origOverlay = if ($saved -and $saved.Power -and $saved.Power.OverlayGuid) { [string]$saved.Power.OverlayGuid } else { $null }
     $powerSnaps  = if ($saved -and $saved.Power -and $saved.Power.Settings) { @($saved.Power.Settings) } else { @() }
@@ -290,7 +482,10 @@ function Restore-SessionRuntimeState {
             foreach ($svcEntry in $saved.Services) { if ($svcEntry.WasRunning) { & sc.exe start $svcEntry.Name | Out-Null } }
         }
         if ($saved -and $saved.DdmPath -and [System.IO.File]::Exists([string]$saved.DdmPath)) {
-            if (-not (Get-Process -Name "ddm" -ErrorAction SilentlyContinue)) {
+            $ddmProcs = @(Get-Process -Name "ddm" -ErrorAction SilentlyContinue)
+            $ddmRunning = $ddmProcs.Count -gt 0
+            foreach ($dp in $ddmProcs) { $dp.Dispose() }
+            if (-not $ddmRunning) {
                 try { Start-Process -FilePath ([string]$saved.DdmPath) -WindowStyle Minimized -ErrorAction SilentlyContinue } catch {}
             }
         }

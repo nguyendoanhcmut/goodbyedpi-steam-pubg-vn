@@ -50,11 +50,51 @@ public static class PubgNativeGuard {
 }
 "@
 
+function Resolve-SteamPubgInstallDir {
+    try {
+        $uninstKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 578080", $false)
+        if ($null -ne $uninstKey) {
+            try {
+                $instLoc = [string]$uninstKey.GetValue("InstallLocation", "")
+                if ($instLoc -and [System.IO.Directory]::Exists($instLoc)) { return $instLoc }
+            } finally { $uninstKey.Dispose() }
+        }
+    } catch {}
+    $steamRoot = $null
+    foreach ($regSpec in @("HKLM:\SOFTWARE\WOW6432Node\Valve\Steam|InstallPath", "HKCU:\Software\Valve\Steam|SteamPath")) {
+        $parts = $regSpec -split '\|'
+        try {
+            $val = (Get-ItemProperty -Path $parts[0] -Name $parts[1] -ErrorAction SilentlyContinue).($parts[1])
+            if ($val -and [System.IO.Directory]::Exists($val)) { $steamRoot = $val.Replace('/', '\'); break }
+        } catch {}
+    }
+    if (-not $steamRoot) { $steamRoot = Join-Path ${env:ProgramFiles(x86)} "Steam" }
+    $libDirs = New-Object System.Collections.Generic.List[string]
+    if ($steamRoot) { $libDirs.Add($steamRoot) }
+    $vdfPath = if ($steamRoot) { Join-Path $steamRoot "steamapps\libraryfolders.vdf" } else { "" }
+    if ($vdfPath -and [System.IO.File]::Exists($vdfPath)) {
+        try {
+            $vdfRaw = [System.IO.File]::ReadAllText($vdfPath, [System.Text.Encoding]::UTF8)
+            foreach ($m in [regex]::Matches($vdfRaw, '"path"\s+"([^"]+)"')) {
+                $p = $m.Groups[1].Value.Replace('\\', '\')
+                if ($p -and -not $libDirs.Contains($p)) { $libDirs.Add($p) }
+            }
+        } catch {}
+    }
+    foreach ($lib in $libDirs) {
+        $cand = Join-Path $lib "steamapps\common\PUBG"
+        if ([System.IO.Directory]::Exists($cand)) { return $cand }
+    }
+    return (Join-Path $steamRoot "steamapps\common\PUBG")
+}
+
 function Disable-PubgStartupMovies {
     param(
         [string]$MoviesDir,
-        [string]$EngineIniPath
+        [string]$EngineIniPath,
+        [switch]$ForceEngineIni
     )
+    $renamedCount = 0
     if ($MoviesDir -and [System.IO.Directory]::Exists($MoviesDir)) {
         try {
             $mp4Files = [System.IO.Directory]::GetFiles($MoviesDir, "*.mp4", [System.IO.SearchOption]::AllDirectories)
@@ -66,11 +106,12 @@ function Disable-PubgStartupMovies {
                         [System.IO.File]::Delete($bak)
                     }
                     [System.IO.File]::Move($mp4, $bak)
+                    $renamedCount++
                 } catch {}
             }
         } catch {}
     }
-    if ($EngineIniPath -and [System.IO.File]::Exists($EngineIniPath)) {
+    if (($renamedCount -gt 0 -or $ForceEngineIni) -and $EngineIniPath -and [System.IO.File]::Exists($EngineIniPath)) {
         try {
             $rawIni = [System.IO.File]::ReadAllText($EngineIniPath, [System.Text.Encoding]::UTF8)
             $needsUpdate = ($rawIni -notmatch 'bWaitForMoviesToComplete=False') -or
@@ -92,6 +133,10 @@ function Disable-PubgStartupMovies {
                     }
                 }
                 [System.IO.File]::WriteAllText($EngineIniPath, $rawIni, (New-Object System.Text.UTF8Encoding($false)))
+            }
+            $attr = [System.IO.File]::GetAttributes($EngineIniPath)
+            if (($attr -band [System.IO.FileAttributes]::ReadOnly) -eq 0) {
+                [System.IO.File]::SetAttributes($EngineIniPath, ($attr -bor [System.IO.FileAttributes]::ReadOnly))
             }
         } catch {}
     }
@@ -115,10 +160,13 @@ function Sync-PubgIntegrityCheckHistory {
             foreach ($el in $existingLines) {
                 $parts = $el -split ','
                 if ($parts.Count -ge 3 -and $parts[1] -match '^\d+\.\d+\.\d+\.\d+$') {
-                    $vCandidate = $parts[1].Trim()
-                    if (-not $clientVersion -or ([version]$vCandidate -gt [version]$clientVersion)) {
-                        $clientVersion = $vCandidate
-                    }
+                    try {
+                        $vCandidate = $parts[1].Trim()
+                        $parsedCand = [version]$vCandidate
+                        if (-not $clientVersion -or ($parsedCand -gt [version]$clientVersion)) {
+                            $clientVersion = $vCandidate
+                        }
+                    } catch {}
                 }
             }
         } catch {}
@@ -130,7 +178,8 @@ function Sync-PubgIntegrityCheckHistory {
             $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($tslExePath)
             if ($vi.FileMajorPart -gt 0) {
                 $exeVer = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart).$($vi.FilePrivatePart)"
-                if (-not $clientVersion -or ([version]$exeVer -ge [version]$clientVersion)) {
+                if ($exeVer -match '^\d+\.\d+\.\d+\.\d+$') {
+                    [void]([version]$exeVer)
                     $clientVersion = $exeVer
                 }
             }
@@ -151,7 +200,7 @@ function Sync-PubgIntegrityCheckHistory {
         if ($hl -match '^"([^"]+)"') {
             $relPath = $Matches[1]
             try {
-                $fullPath = [System.IO.Path]::GetFullPath((Join-Path $BinariesWin64Dir $relPath))
+                $fullPath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($BinariesWin64Dir, $relPath))
                 if ([System.IO.File]::Exists($fullPath)) {
                     $fi = [System.IO.FileInfo]::new($fullPath)
                     $stamp = $fi.LastWriteTimeUtc.ToString("yyyy.MM.dd-HH.mm.ss", $inv)
@@ -167,18 +216,29 @@ function Sync-PubgIntegrityCheckHistory {
     }
 
     if ($targetLines.Count -gt 0 -and ($needsWrite -or $existingLines.Count -ne $targetLines.Count)) {
+        $tmpHist = "$HistoryCsvPath.tmp"
         try {
             $histDir = [System.IO.Path]::GetDirectoryName($HistoryCsvPath)
             if ($histDir -and -not [System.IO.Directory]::Exists($histDir)) {
                 [System.IO.Directory]::CreateDirectory($histDir) | Out-Null
             }
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-            $tmpHist = "$HistoryCsvPath.tmp"
             [System.IO.File]::WriteAllLines($tmpHist, $targetLines.ToArray(), $utf8NoBom)
+            if ([System.IO.File]::Exists($HistoryCsvPath)) {
+                try {
+                    $curAttr = [System.IO.File]::GetAttributes($HistoryCsvPath)
+                    if (($curAttr -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                        [System.IO.File]::SetAttributes($HistoryCsvPath, ($curAttr -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+                    }
+                } catch {}
+            }
             [System.IO.File]::Copy($tmpHist, $HistoryCsvPath, $true)
-            [System.IO.File]::Delete($tmpHist)
             return $targetLines.Count
-        } catch {}
+        } catch {} finally {
+            if ([System.IO.File]::Exists($tmpHist)) {
+                try { [System.IO.File]::Delete($tmpHist) } catch {}
+            }
+        }
     }
     return 0
 }
@@ -187,12 +247,13 @@ function Invoke-PubgBinaryPageCacheWarmup {
     param([string]$BinariesWin64Dir)
     if (-not $BinariesWin64Dir -or -not [System.IO.Directory]::Exists($BinariesWin64Dir)) { return }
     $buf = New-Object byte[] 4194304
+    $pf86 = ${env:ProgramFiles(x86)}
     $warmTargets = @(
         (Join-Path $BinariesWin64Dir "TslGame.exe"),
         (Join-Path $BinariesWin64Dir "TslGame_ZK.exe"),
         (Join-Path $BinariesWin64Dir "ExecPubg.exe"),
         (Join-Path $BinariesWin64Dir "TslGame_BE.exe"),
-        "C:\Program Files (x86)\Common Files\BattlEye\BEService.exe"
+        (Join-Path $pf86 "Common Files\BattlEye\BEService.exe")
     )
     foreach ($fp in $warmTargets) {
         if ([System.IO.File]::Exists($fp)) {
@@ -208,18 +269,23 @@ function Invoke-PubgBinaryPageCacheWarmup {
     }
 }
 
-& powercfg.exe /setacvalueindex SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 | Out-Null
-& powercfg.exe /setdcvalueindex SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 | Out-Null
-& powercfg.exe /setactive SCHEME_CURRENT | Out-Null
+$activeSchemeOut = (& powercfg.exe /getactivescheme 2>$null) -join " "
+if ($activeSchemeOut -and $activeSchemeOut -notmatch '381b4222-f694-41f0-9685-ff5bb260df2e') {
+    & powercfg.exe /setacvalueindex SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 | Out-Null
+    & powercfg.exe /setdcvalueindex SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 | Out-Null
+    & powercfg.exe /setactive SCHEME_CURRENT | Out-Null
+}
 
 # Windows reverts WlanSetInterface OpCodes 2 and 3 as soon as the calling WlanOpenHandle closes.
 $negVer = [uint32]0
 $wlanHandle = [IntPtr]::Zero
 [void][PubgNativeGuard]::WlanOpenHandle(2, [IntPtr]::Zero, [ref]$negVer, [ref]$wlanHandle)
 
-$pubgAcfPath = "C:\Program Files (x86)\Steam\steamapps\appmanifest_578080.acf"
-$pubgBinariesWin64Dir = "C:\Program Files (x86)\Steam\steamapps\common\PUBG\TslGame\Binaries\Win64"
-$pubgMoviesDir = "C:\Program Files (x86)\Steam\steamapps\common\PUBG\TslGame\Content\Movies"
+$pubgInstallDir = Resolve-SteamPubgInstallDir
+$steamAppsDir = Split-Path (Split-Path $pubgInstallDir -Parent) -Parent
+$pubgAcfPath = Join-Path $steamAppsDir "appmanifest_578080.acf"
+$pubgBinariesWin64Dir = Join-Path $pubgInstallDir "TslGame\Binaries\Win64"
+$pubgMoviesDir = Join-Path $pubgInstallDir "TslGame\Content\Movies"
 $engineIniPath = Join-Path $env:LOCALAPPDATA "TslGame\Saved\Config\WindowsNoEditor\Engine.ini"
 $integrityCsvPath = Join-Path $env:LOCALAPPDATA "TslGame\Saved\IntegrityCheck\IntegrityCheckHistory.csv"
 
@@ -230,18 +296,25 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if ($isAdmin) {
     Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "Cloudflare WARP" -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "CloudflareWARP" -ErrorAction SilentlyContinue
-    foreach ($exeName in @("TslGame.exe", "ExecPubg.exe")) {
+    $ifeoPrioTable = @{
+        "TslGame.exe"    = 3
+        "ExecPubg.exe"   = 3
+        "TslGame_BE.exe" = 2
+        "TslGame_ZK.exe" = 2
+    }
+    foreach ($exeName in $ifeoPrioTable.Keys) {
         $ifeoPerfPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$exeName\PerfOptions"
         if (-not (Test-Path -LiteralPath $ifeoPerfPath)) {
             New-Item -Path $ifeoPerfPath -Force -ErrorAction SilentlyContinue | Out-Null
         }
-        New-ItemProperty -Path $ifeoPerfPath -Name "CpuPriorityClass" -Value 3 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+        New-ItemProperty -Path $ifeoPerfPath -Name "CpuPriorityClass" -Value $ifeoPrioTable[$exeName] -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
     }
+    $pf86 = ${env:ProgramFiles(x86)}
     Add-MpPreference -ExclusionPath @(
-        "C:\Program Files (x86)\Steam\steamapps\common\PUBG",
-        "C:\Users\Admin\AppData\Local\TslGame",
-        "C:\Program Files (x86)\Common Files\BattlEye",
-        "C:\Program Files (x86)\Common Files\BattlEye\BEDaisy.sys",
+        $pubgInstallDir,
+        "$env:LOCALAPPDATA\TslGame",
+        (Join-Path $pf86 "Common Files\BattlEye"),
+        (Join-Path $pf86 "Common Files\BattlEye\BEDaisy.sys"),
         "C:\Program Files\Common Files\PUBG",
         "C:\Program Files\Common Files\PUBG\navagio.sys"
     ) -ExclusionProcess @(
@@ -269,15 +342,24 @@ try {
             [PubgNativeGuard]::AssertLowLatencyWlan($wlanHandle)
 
             $warpGui = [System.Diagnostics.Process]::GetProcessesByName("Cloudflare WARP")
-            if ($warpGui.Length -gt 0) {
-                $warpSvc = Get-Service -Name "CloudflareWARP" -ErrorAction SilentlyContinue
-                if ($null -eq $warpSvc -or $warpSvc.Status -ne "Running") {
-                    Stop-Process -Name "Cloudflare WARP" -Force -ErrorAction SilentlyContinue
+            try {
+                if ($warpGui.Length -gt 0) {
+                    $warpSvc = Get-Service -Name "CloudflareWARP" -ErrorAction SilentlyContinue
+                    if ($null -eq $warpSvc -or $warpSvc.Status -ne "Running") {
+                        Stop-Process -Name "Cloudflare WARP" -Force -ErrorAction SilentlyContinue
+                    }
                 }
+            } finally {
+                foreach ($wp in $warpGui) { if ($null -ne $wp) { try { $wp.Dispose() } catch {} } }
             }
         }
 
-        $launchDetected = ([System.Diagnostics.Process]::GetProcessesByName("ExecPubg").Length -gt 0) -or ([System.Diagnostics.Process]::GetProcessesByName("TslGame_ZK").Length -gt 0)
+        $execProcs = [System.Diagnostics.Process]::GetProcessesByName("ExecPubg")
+        $zkProcs   = [System.Diagnostics.Process]::GetProcessesByName("TslGame_ZK")
+        $launchDetected = ($execProcs.Length -gt 0) -or ($zkProcs.Length -gt 0)
+        foreach ($ep in $execProcs) { if ($null -ne $ep) { try { $ep.Dispose() } catch {} } }
+        foreach ($zp in $zkProcs)   { if ($null -ne $zp) { try { $zp.Dispose() } catch {} } }
+
         foreach ($procName in @("ExecPubg", "TslGame")) {
             $procs = [System.Diagnostics.Process]::GetProcessesByName($procName)
             foreach ($p in $procs) {
@@ -285,7 +367,9 @@ try {
                     if ($p.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::Normal) {
                         $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
                     }
-                } catch {}
+                } catch {} finally {
+                    if ($null -ne $p) { try { $p.Dispose() } catch {} }
+                }
             }
         }
 
@@ -304,7 +388,7 @@ try {
                 $curWriteUtc = [System.IO.File]::GetLastWriteTimeUtc($pubgAcfPath)
                 if ($curWriteUtc -ne $lastAcfWriteUtc) {
                     $lastAcfWriteUtc = $curWriteUtc
-                    Disable-PubgStartupMovies -MoviesDir $pubgMoviesDir -EngineIniPath $engineIniPath
+                    Disable-PubgStartupMovies -MoviesDir $pubgMoviesDir -EngineIniPath $engineIniPath -ForceEngineIni
                     [void](Sync-PubgIntegrityCheckHistory -BinariesWin64Dir $pubgBinariesWin64Dir -HistoryCsvPath $integrityCsvPath)
                 }
             }

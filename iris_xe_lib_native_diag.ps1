@@ -80,13 +80,27 @@ public static class PubgIrisXeNative {
         return SetProcessInformation(hProcess, ProcessPowerThrottling, ref state, (uint)Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE)));
     }
 
+    public static bool GetEcoQoSState(IntPtr hProcess, out uint controlMask, out uint stateMask) {
+        PROCESS_POWER_THROTTLING_STATE state = new PROCESS_POWER_THROTTLING_STATE { Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask = 0, StateMask = 0 };
+        if (GetProcessInformation(hProcess, ProcessPowerThrottling, out state, (uint)Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE)))) {
+            controlMask = state.ControlMask;
+            stateMask = state.StateMask;
+            return true;
+        }
+        controlMask = 0;
+        stateMask = 0;
+        return false;
+    }
+
     public static bool SetActivePowerSchemeNative(Guid schemeGuid) {
         return PowerSetActiveScheme(IntPtr.Zero, ref schemeGuid) == 0;
     }
 
     public static bool EnablePrivilege(string privilegeName) {
         IntPtr hToken = IntPtr.Zero;
-        if (!OpenProcessToken(Process.GetCurrentProcess().Handle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out hToken)) return false;
+        using (Process curProc = Process.GetCurrentProcess()) {
+            if (!OpenProcessToken(curProc.Handle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out hToken)) return false;
+        }
         try {
             long luid = 0;
             if (!LookupPrivilegeValueW(null, privilegeName, out luid)) return false;
@@ -211,8 +225,81 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Enter-IrisXeMutex {
+    param([string]$MutexName = "Global\PubgIrisXeBoost_Mutex", [int]$TimeoutMs = 30000)
+    $mtx = $null
+    try {
+        $mtx = New-Object System.Threading.Mutex($false, $MutexName)
+    } catch {
+        $fallbackName = $MutexName -replace '^Global\\', 'Local\'
+        $mtx = New-Object System.Threading.Mutex($false, $fallbackName)
+    }
+    $acquired = $false
+    try {
+        $acquired = $mtx.WaitOne($TimeoutMs)
+    } catch [System.Threading.AbandonedMutexException] {
+        $acquired = $true
+    }
+    return [PSCustomObject]@{ Mutex = $mtx; Acquired = $acquired }
+}
+
+function Exit-IrisXeMutex {
+    param([object]$LockHandle)
+    if ($null -ne $LockHandle -and $null -ne $LockHandle.Mutex) {
+        try { if ($LockHandle.Acquired) { $LockHandle.Mutex.ReleaseMutex() } } catch {}
+        try { $LockHandle.Mutex.Dispose() } catch {}
+    }
+}
+
+function Resolve-SteamPubgInstallDir {
+    $uninstKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 578080"
+    if (Test-Path -LiteralPath $uninstKey) {
+        try {
+            $loc = (Get-ItemProperty -LiteralPath $uninstKey -Name "InstallLocation" -ErrorAction SilentlyContinue).InstallLocation
+            if ($loc -and (Test-Path -LiteralPath $loc)) { return $loc }
+        } catch {}
+    }
+    $pf86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }
+    $defaultSteamRoot = Join-Path $pf86 "Steam"
+    $steamRoot = $null
+    foreach ($rk in @("HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam", "HKCU:\Software\Valve\Steam")) {
+        if (-not $steamRoot -and (Test-Path -LiteralPath $rk)) {
+            try {
+                $props = Get-ItemProperty -LiteralPath $rk -ErrorAction SilentlyContinue
+                if ($props.InstallPath -and (Test-Path -LiteralPath $props.InstallPath)) { $steamRoot = [string]$props.InstallPath }
+                elseif ($props.SteamPath -and (Test-Path -LiteralPath $props.SteamPath)) { $steamRoot = ([string]$props.SteamPath).Replace('/', '\') }
+            } catch {}
+        }
+    }
+    if (-not $steamRoot) { $steamRoot = $defaultSteamRoot }
+    $libRoots = New-Object System.Collections.Generic.List[string]
+    if ($steamRoot) { $libRoots.Add($steamRoot) }
+    foreach ($vdfRel in @("steamapps\libraryfolders.vdf", "config\libraryfolders.vdf")) {
+        $vdfPath = Join-Path $steamRoot $vdfRel
+        if ([System.IO.File]::Exists($vdfPath)) {
+            try {
+                $vdfRaw = [System.IO.File]::ReadAllText($vdfPath, [System.Text.Encoding]::UTF8)
+                foreach ($m in [regex]::Matches($vdfRaw, '"path"\s+"([^"]+)"')) {
+                    $p = $m.Groups[1].Value -replace '\\\\', '\'
+                    if ($p -and -not $libRoots.Contains($p)) { $libRoots.Add($p) }
+                }
+            } catch {}
+        }
+    }
+    foreach ($root in $libRoots) {
+        $candidateDir = Join-Path $root "steamapps\common\PUBG"
+        $candidateAcf = Join-Path $root "steamapps\appmanifest_578080.acf"
+        if ((Test-Path -LiteralPath $candidateDir) -or [System.IO.File]::Exists($candidateAcf)) {
+            return $candidateDir
+        }
+    }
+    return (Join-Path $defaultSteamRoot "steamapps\common\PUBG")
+}
+
 function Get-SteamPubgBuildId {
-    $acfPath = "C:\Program Files (x86)\Steam\steamapps\appmanifest_578080.acf"
+    $pubgDir = Resolve-SteamPubgInstallDir
+    $steamAppsDir = Split-Path (Split-Path $pubgDir -Parent) -Parent
+    $acfPath = Join-Path $steamAppsDir "appmanifest_578080.acf"
     if ([System.IO.File]::Exists($acfPath)) {
         try { if (([System.IO.File]::ReadAllText($acfPath, [System.Text.Encoding]::UTF8)) -match '"buildid"\s+"(\d+)"') { return $Matches[1] } } catch {}
     }
@@ -251,7 +338,9 @@ function Test-SystemHardwareAndMemory {
     $busWidthBits    = if ($dimmCount -ge 2) { 128 } else { 64 }
     $peakBandwidthGBs = [math]::Round(($clockMTs * ($busWidthBits / 8)) / 1000.0, 1)
     $channelMode = if ($isSymmetricDual) { "Symmetric Dual-Channel (128-bit)" } elseif ($isFlexDual) { "Asymmetric Flex Dual-Channel (Partial 128-bit)" } else { "Single-Channel (64-bit)" }
-    $wavesActive = $null -ne (Get-Process -Name "WavesSvc64","WavesSysSvc" -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $wavesProcs = @(Get-Process -Name "WavesSvc64","WavesSysSvc" -ErrorAction SilentlyContinue)
+    $wavesActive = $wavesProcs.Count -gt 0
+    foreach ($wp in $wavesProcs) { $wp.Dispose() }
 
     return [PSCustomObject]@{
         SystemModel = if ($cs) { "$($cs.Manufacturer) $($cs.Model)".Trim() } else { "Unknown" }; CpuName = if ($cpu) { $cpu.Name.Trim() } else { "Unknown" }
@@ -272,8 +361,11 @@ function Test-VbsHvciOverhead {
 
 function Assert-MemoryAndPagefileHealth {
     param([Parameter(Position = 0)][bool]$IsAdmin = $false, [Parameter(Position = 1)][bool]$IsDryRun = $false)
-    $mcProc = Get-Process -Name "Memory Compression" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $mcActive = ($null -ne $mcProc) -and ($mcProc.WorkingSet64 -gt 0); $mmChanged = $false
+    $mcProcs = @(Get-Process -Name "Memory Compression" -ErrorAction SilentlyContinue)
+    $mcProc = if ($mcProcs.Count -gt 0) { $mcProcs[0] } else { $null }
+    $mcWsBytes = if ($null -ne $mcProc) { $mcProc.WorkingSet64 } else { 0L }
+    foreach ($mp in $mcProcs) { $mp.Dispose() }
+    $mcActive = $mcWsBytes -gt 0; $mmChanged = $false
     if ($IsAdmin -and -not $IsDryRun) {
         try {
             $mm = Get-MMAgent -ErrorAction Stop
@@ -286,7 +378,7 @@ function Assert-MemoryAndPagefileHealth {
     $pfAllocMB = if ($null -ne $pfUsage) { [int]$pfUsage.AllocatedBaseSize } else { 0 }
     $pagefileEnabled = ($pfAllocMB -gt 0) -or ($null -ne $mmKey.ExistingPageFiles -and $mmKey.ExistingPageFiles.Count -gt 0)
     return [PSCustomObject]@{
-        MemoryCompressionActive = $mcActive; CompressedWorkingSetMB = if ($null -ne $mcProc) { [math]::Round($mcProc.WorkingSet64 / 1MB, 1) } else { 0.0 }
+        MemoryCompressionActive = $mcActive; CompressedWorkingSetMB = if ($mcWsBytes -gt 0) { [math]::Round($mcWsBytes / 1MB, 1) } else { 0.0 }
         PagefileEnabled = $pagefileEnabled; PagefileSufficient = ($pfAllocMB -ge 4096)
         PagefileAllocatedMB = $pfAllocMB; PagefileCurrentUsageMB = if ($null -ne $pfUsage) { [int]$pfUsage.CurrentUsage } else { 0 }; MMAgentUpdated = $mmChanged
     }
@@ -302,19 +394,25 @@ function Set-BackgroundProcessesToECores {
     $topo = [PubgIrisXeNative]::DetectTopology(); if ($PinMask -eq 0) { $PinMask = $topo.BackgroundPinMask }
     $saved = @(); if ($PinMask -eq 0) { return $saved }
     $existingByPid = @{}; if ($null -ne $ExistingRecords) { foreach ($r in $ExistingRecords) { if ($null -ne $r -and $null -ne $r.Id) { $existingByPid["$($r.Id):$($r.ProcessName)"] = $r } } }
+    $qosSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf([type][PubgIrisXeNative+PROCESS_POWER_THROTTLING_STATE])
     foreach ($name in $BackgroundPinTargets) {
         foreach ($p in [System.Diagnostics.Process]::GetProcessesByName($name)) {
             try {
                 $curMask = [uint64]$p.ProcessorAffinity.ToInt64(); $curPrio = [string]$p.PriorityClass; $key = "$($p.Id):$($p.ProcessName)"
                 $oldMask = if ($existingByPid.ContainsKey($key) -and [uint64]$existingByPid[$key].OriginalMask -gt 0 -and [uint64]$existingByPid[$key].OriginalMask -ne $PinMask) { [uint64]$existingByPid[$key].OriginalMask } elseif ($curMask -eq $PinMask -or $curMask -eq 0) { $topo.AllProcessorsMask } else { $curMask }
                 $oldPrio = if ($existingByPid.ContainsKey($key) -and $existingByPid[$key].OriginalPrio -and $existingByPid[$key].OriginalPrio -ne "BelowNormal") { [string]$existingByPid[$key].OriginalPrio } elseif ($curPrio -eq "BelowNormal") { "Normal" } else { $curPrio }
+                $qosState = New-Object PubgIrisXeNative+PROCESS_POWER_THROTTLING_STATE
+                $qosState.Version = [PubgIrisXeNative]::PROCESS_POWER_THROTTLING_CURRENT_VERSION
+                $gotQos = [PubgIrisXeNative]::GetProcessInformation($p.Handle, [PubgIrisXeNative]::ProcessPowerThrottling, [ref]$qosState, $qosSize)
+                $oldEcoCtrl  = if ($existingByPid.ContainsKey($key) -and $null -ne $existingByPid[$key].OriginalEcoControlMask) { [uint32]$existingByPid[$key].OriginalEcoControlMask } elseif ($gotQos) { [uint32]$qosState.ControlMask } else { [uint32]0 }
+                $oldEcoState = if ($existingByPid.ContainsKey($key) -and $null -ne $existingByPid[$key].OriginalEcoStateMask)   { [uint32]$existingByPid[$key].OriginalEcoStateMask }   elseif ($gotQos) { [uint32]$qosState.StateMask }   else { [uint32]0 }
                 $qosMask = if ($p.ProcessName -match '^(?i)Discord$') { [uint32]0x1 } else { [uint32]0x5 }
                 if (-not $IsDryRun) {
                     $p.ProcessorAffinity = [IntPtr]([int64]$PinMask)
                     if ($p.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::Idle) { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal }
                     [void][PubgIrisXeNative]::SetEcoQoSAndTimerThrottle($p.Handle, $qosMask, $qosMask)
                 }
-                $saved += [ordered]@{ Id = $p.Id; ProcessName = $p.ProcessName; OriginalMask = $oldMask; OriginalPrio = $oldPrio; EcoQoSMask = $qosMask }
+                $saved += [ordered]@{ Id = $p.Id; ProcessName = $p.ProcessName; OriginalMask = $oldMask; OriginalPrio = $oldPrio; EcoQoSMask = $qosMask; OriginalEcoControlMask = $oldEcoCtrl; OriginalEcoStateMask = $oldEcoState }
             } catch {} finally { $p.Dispose() }
         }
     }
@@ -326,7 +424,7 @@ function Restore-BackgroundProcessesAffinity {
     if ($IsDryRun) { return }
     $topo = [PubgIrisXeNative]::DetectTopology()
     $restoredIds = @{}
-    if ($null -ne $PinnedRecords) {
+    if ($null -ne $PinnedRecords -and @($PinnedRecords).Count -gt 0) {
         foreach ($rec in $PinnedRecords) {
             if ($null -eq $rec -or $null -eq $rec.Id) { continue }
             $lp = $null
@@ -337,19 +435,26 @@ function Restore-BackgroundProcessesAffinity {
                     $rPrio = if ($rec.OriginalPrio -and ($rec.OriginalPrio -as [System.Diagnostics.ProcessPriorityClass])) { [System.Diagnostics.ProcessPriorityClass]$rec.OriginalPrio } else { [System.Diagnostics.ProcessPriorityClass]::Normal }
                     $lp.ProcessorAffinity = [IntPtr]([int64]$rMask)
                     if ($lp.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::Idle) { $lp.PriorityClass = $rPrio }
-                    [void][PubgIrisXeNative]::SetEcoQoSAndTimerThrottle($lp.Handle, 0, 0)
+                    $origCtrl  = if ($null -ne $rec.OriginalEcoControlMask) { [uint32]$rec.OriginalEcoControlMask } else { [uint32]0 }
+                    $origState = if ($null -ne $rec.OriginalEcoStateMask)   { [uint32]$rec.OriginalEcoStateMask }   else { [uint32]0 }
+                    [void][PubgIrisXeNative]::SetEcoQoSAndTimerThrottle($lp.Handle, [uint32]0x5, [uint32]0)
+                    [void][PubgIrisXeNative]::SetEcoQoSAndTimerThrottle($lp.Handle, $origCtrl, $origState)
                     $restoredIds[[int]$lp.Id] = $true
                 }
             } catch {} finally { if ($null -ne $lp) { $lp.Dispose() } }
         }
+        return
     }
     foreach ($name in $BackgroundPinTargets) {
         foreach ($p in [System.Diagnostics.Process]::GetProcessesByName($name)) {
             try {
                 if ($restoredIds.ContainsKey($p.Id)) { continue }
-                $p.ProcessorAffinity = [IntPtr]([int64]$topo.AllProcessorsMask)
-                if ($p.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::Idle) { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal }
-                [void][PubgIrisXeNative]::SetEcoQoSAndTimerThrottle($p.Handle, 0, 0)
+                if ([uint64]$p.ProcessorAffinity.ToInt64() -eq $topo.BackgroundPinMask) {
+                    $p.ProcessorAffinity = [IntPtr]([int64]$topo.AllProcessorsMask)
+                    if ($p.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::BelowNormal) { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal }
+                    [void][PubgIrisXeNative]::SetEcoQoSAndTimerThrottle($p.Handle, [uint32]0x5, [uint32]0)
+                    [void][PubgIrisXeNative]::SetEcoQoSAndTimerThrottle($p.Handle, 0, 0)
+                }
             } catch {} finally { $p.Dispose() }
         }
     }
