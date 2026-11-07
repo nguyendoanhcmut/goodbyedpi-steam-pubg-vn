@@ -269,7 +269,8 @@ try {
 
     function Wait-PubgSessionAndRestore {
         Write-Host "`n[SESSION GUARD] Dang giam sat TslGame.exe & UnrealCEFSubProcess_3071..." -ForegroundColor Cyan
-        Write-Host "  -> Hay mo game PUBG! Khi thoat PUBG (hoac nhan Enter / Ctrl+C), Power Scheme & CPU Affinity se tu dong khoi phuc!" -ForegroundColor Yellow
+        Write-Host "  -> Bam phim [1]..[5] ngay tai cua so nay de doi nhanh che do do phan giai truoc khi mo game!" -ForegroundColor Green
+        Write-Host "  -> Hay mo game PUBG! Khi thoat PUBG (hoac nhan Enter / Esc / Q), Power Scheme & CPU Affinity se tu dong khoi phuc!" -ForegroundColor Yellow
         $timerLocked = $false
         try {
             $selfProc = $null
@@ -289,6 +290,17 @@ try {
                 if ([Console]::KeyAvailable) {
                     $k = [Console]::ReadKey($true)
                     if ($k.Key -eq [ConsoleKey]::Enter -or $k.Key -eq [ConsoleKey]::Escape -or $k.Key -eq [ConsoleKey]::Q) { break }
+                    if ($k.KeyChar -in @('1','2','3','4','5')) {
+                        $hotPreset = switch ($k.KeyChar) {
+                            '1' { 'NativeCrisp' }
+                            '2' { 'HighClarity' }
+                            '3' { 'BalancedPlus' }
+                            '4' { 'PerfSharp' }
+                            '5' { 'UltraPerf' }
+                        }
+                        $hotIni = Optimize-PubgIniFiles -TargetConfigDir $ConfigDir -TargetGraphicsAPI $GraphicsAPI -TargetFpsCap $InGameFpsCap -TurnOffHrtf $DisableHrtf.IsPresent -QualityPreset $hotPreset -PeakBandwidthGBs $hw.PeakBandwidthGBs -IsDryRun $isDry
+                        Write-Host ("  [HOT-SWITCH] Da doi sang [{0}] {1} -> {2}x{3} @ {4}% Scale (3D: {5}x{6} | Tex={7})! (Neu dang trong tran, chinh truc tiep trong Esc -> Do hoa)" -f $k.KeyChar, $hotIni.AppliedPreset, $hotIni.TargetResX, $hotIni.TargetResY, $hotIni.TargetScale, $hotIni.Render3DX, $hotIni.Render3DY, $hotIni.TextureQuality) -ForegroundColor Green
+                    }
                 }
                 $tsl = @([System.Diagnostics.Process]::GetProcessesByName("TslGame"))
                 foreach ($tp in $tsl) { $tp.Dispose() }
