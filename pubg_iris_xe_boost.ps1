@@ -7,9 +7,12 @@ param(
     [switch]$DisableHrtf,
     [switch]$DisableMpo,
     [ValidateSet("DX11", "DX11_Enhanced")][string]$GraphicsAPI = "DX11",
+    [ValidateSet("NativeCrisp", "PerfSharp", "BalancedPlus", "HighClarity", "UltraPerf", "Custom")][string]$QualityPreset = "NativeCrisp",
     [int]$ResolutionX = 0,
     [int]$ResolutionY = 0,
-    [ValidateRange(70, 100)][int]$ScreenScale = 80,
+    [ValidateRange(0, 100)][int]$ScreenScale = 0,
+    [ValidateRange(-1, 4)][int]$TextureQuality = -1,
+    [ValidateRange(-1, 4)][int]$AntiAliasingQuality = -1,
     [ValidateRange(30, 240)][int]$InGameFpsCap = 60,
     [switch]$NoWait,
     [string]$StateFile = "$env:LOCALAPPDATA\TslGame\Saved\pubg_iris_xe_boost_state.json",
@@ -23,6 +26,7 @@ $isDry = $DryRun.IsPresent
 . "$PSScriptRoot\iris_xe_lib_native_diag.ps1"
 . "$PSScriptRoot\iris_xe_lib_ue4_cache.ps1"
 . "$PSScriptRoot\iris_xe_lib_power_os.ps1"
+try { [void][PubgIrisXeNative]::DisableConsoleQuickEdit() } catch {}
 
 $isAdmin = Test-IsAdministrator
 if (-not $isAdmin -and -not $isDry) {
@@ -71,6 +75,25 @@ try {
     Write-Host " TOI UU HOA PUBG PC CHO DELL LATITUDE 3450 (i7-1355U + INTEL IRIS XE)" -ForegroundColor Cyan
     if ($isDry) { Write-Host " [CHE DO DRY-RUN: CHI KIEM TRA VA BAO CAO, KHONG GHI THAY DOI]" -ForegroundColor Yellow }
     Write-Host "=========================================================================" -ForegroundColor Cyan
+
+    if (-not $NoWait -and -not $isDry -and -not $PSBoundParameters.ContainsKey("QualityPreset") -and $ResolutionX -le 0 -and $ScreenScale -le 0 -and -not [Console]::IsInputRedirected) {
+        Write-Host "`n Chon Che Do Do Phan Giai & Do Net (Nhan so 1..5 roi Enter, hoac nhan Enter de chon [1]):" -ForegroundColor Yellow
+        Write-Host "   [1] NativeCrisp  (Khuyen dung) : Full HD 1080p/1200p @ 70% Scale + Texture Low (Tam ngam net 1:1, ~52-60 FPS)" -ForegroundColor Green
+        Write-Host "   [2] HighClarity  (Sieu net)    : Full HD 1080p/1200p @ 80% Scale + Texture Low (Nhieu hon +125% diem anh 3D, ~45-53 FPS)" -ForegroundColor Cyan
+        Write-Host "   [3] BalancedPlus (Can bang)    : 1600x900 / 1680x1050 @ 85% Scale + Texture Low (~52-59 FPS)" -ForegroundColor White
+        Write-Host "   [4] PerfSharp    (720p 100%)   : 1280x720 / 1280x800  @ 100% Scale + Texture Low (Khong keo gian kep, ~56-60 FPS)" -ForegroundColor White
+        Write-Host "   [5] UltraPerf    (Ban cu)      : 1280x720 / 1280x800  @ 80% Scale + Texture Very Low (Nhe nhat, ~60 FPS)" -ForegroundColor DarkGray
+        $rawChoice = Read-Host " Lua chon cua ban [Mac dinh = 1]"
+        $choice = if ($null -ne $rawChoice) { ([string]$rawChoice).Trim() } else { "" }
+        switch ($choice) {
+            "2" { $QualityPreset = "HighClarity" }
+            "3" { $QualityPreset = "BalancedPlus" }
+            "4" { $QualityPreset = "PerfSharp" }
+            "5" { $QualityPreset = "UltraPerf" }
+            default { $QualityPreset = "NativeCrisp" }
+        }
+        Write-Host "  -> Da chon che do: $QualityPreset" -ForegroundColor Green
+    }
 
     $hw = Test-SystemHardwareAndMemory
     $topo = $hw.Topology
@@ -145,9 +168,10 @@ try {
     }
 
     Write-Host "`n[2/6] Toi uu GameUserSettings.ini & Engine.ini (Bao toan 100% Phim tat/Tam ngam):" -ForegroundColor White
-    $iniResult = Optimize-PubgIniFiles -TargetConfigDir $ConfigDir -TargetGraphicsAPI $GraphicsAPI -TargetResX $ResolutionX -TargetResY $ResolutionY -TargetScale $ScreenScale -TargetFpsCap $InGameFpsCap -TurnOffHrtf $DisableHrtf.IsPresent -IsDryRun $isDry
+    $iniResult = Optimize-PubgIniFiles -TargetConfigDir $ConfigDir -TargetGraphicsAPI $GraphicsAPI -TargetResX $ResolutionX -TargetResY $ResolutionY -TargetScale $ScreenScale -TargetFpsCap $InGameFpsCap -TurnOffHrtf $DisableHrtf.IsPresent -QualityPreset $QualityPreset -TargetTextureQuality $TextureQuality -TargetAntiAliasingQuality $AntiAliasingQuality -PeakBandwidthGBs $hw.PeakBandwidthGBs -IsDryRun $isDry
     $demosResult = Measure-PubgDemosFolder -RemoveOldDemos $CleanDemos.IsPresent -IsDryRun $isDry
-    Write-Host ("  - Render Pipeline : API={0} | Fullscreen {1}x{2} @ ScreenScale {3}% (3D Internal: {4}x{5}) | Sharpen=True" -f $GraphicsAPI, $iniResult.AppliedResolutionX, $iniResult.AppliedResolutionY, $iniResult.AppliedScreenScale, $iniResult.InternalRenderX, $iniResult.InternalRenderY)
+    Write-Host ("  - Render Pipeline : Preset={0} | API={1} | Fullscreen {2}x{3} @ ScreenScale {4}% (3D Internal: {5}x{6}) | Sharpen=True" -f $iniResult.AppliedPreset, $GraphicsAPI, $iniResult.AppliedResolutionX, $iniResult.AppliedResolutionY, $iniResult.AppliedScreenScale, $iniResult.InternalRenderX, $iniResult.InternalRenderY)
+    Write-Host ("  - Scaling & Tex   : {0} | sg.TextureQuality={1} (MipBias=0) | sg.AntiAliasingQuality={2}" -f $iniResult.ScalingMode, $iniResult.AppliedTextureQuality, $iniResult.AppliedAntiAliasingQuality)
     Write-Host ("  - Frame Pacing    : Lobby=Fixed_30 | In-Game=Customizable ({0} FPS) | ClientReplay=False | KillCam=False (L96 & L145)" -f $InGameFpsCap)
     Write-Host ("  - Demos Folder    : {0} tran ({1} files, {2} MB) | Cleaned={3}" -f $demosResult.MatchCount, $demosResult.FileCount, $demosResult.SizeMB, $demosResult.Cleaned)
 

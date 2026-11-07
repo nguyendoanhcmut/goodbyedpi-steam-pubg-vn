@@ -40,17 +40,154 @@ function Remove-IniSection {
     return ($trimmed + "`r`n")
 }
 
+function Resolve-PubgQualityPreset {
+    param(
+        [string]$Preset = "NativeCrisp",
+        [int]$DeskW = 1920,
+        [int]$DeskH = 1080,
+        [int]$RequestedResX = 0,
+        [int]$RequestedResY = 0,
+        [int]$RequestedScale = 0,
+        [int]$RequestedTextureQuality = -1,
+        [int]$RequestedAntiAliasingQuality = -1,
+        [double]$PeakBandwidthGBs = 83.2,
+        [bool]$CanCheckRes = $false
+    )
+    $is16By10 = ($DeskW -gt 0 -and $DeskH -gt 0 -and (($DeskW * 10) -eq ($DeskH * 16)))
+    $nativeCapW = if ($DeskW -gt 0 -and $DeskW -le 1920) { $DeskW } else { 1920 }
+    $nativeCapH = if ($DeskW -gt 0 -and $DeskW -le 1920 -and $DeskH -gt 0) { $DeskH } elseif ($is16By10) { 1200 } else { 1080 }
+    if ($CanCheckRes -and -not [PubgIrisXeNative]::IsDisplayResolutionSupported($nativeCapW, $nativeCapH)) {
+        if ($is16By10 -and [PubgIrisXeNative]::IsDisplayResolutionSupported(1920, 1200)) { $nativeCapW = 1920; $nativeCapH = 1200 }
+        elseif ($is16By10 -and [PubgIrisXeNative]::IsDisplayResolutionSupported(1680, 1050)) { $nativeCapW = 1680; $nativeCapH = 1050 }
+        elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1920, 1080)) { $nativeCapW = 1920; $nativeCapH = 1080 }
+        elseif ($DeskW -gt 0 -and $DeskH -gt 0) { $nativeCapW = $DeskW; $nativeCapH = $DeskH }
+    }
+    $lowResY = if ($is16By10 -and (-not $CanCheckRes -or [PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800))) { 800 } else { 720 }
+
+    $effectivePreset = if ([string]::IsNullOrWhiteSpace($Preset)) { "NativeCrisp" } else { $Preset }
+    if ($RequestedResX -gt 0 -and $RequestedResY -gt 0 -and $effectivePreset -eq "NativeCrisp") {
+        # Caller explicitly provided TargetResX/TargetResY without changing Preset; treat as Custom override for backward compatibility.
+        $effectivePreset = "Custom"
+    }
+
+    $resX = $nativeCapW; $resY = $nativeCapH; $scale = 70; $texQ = 1; $aaQ = 0
+    switch ($effectivePreset) {
+        "NativeCrisp" {
+            if ($PeakBandwidthGBs -gt 0 -and $PeakBandwidthGBs -lt 45.0) {
+                $resX = 1280; $resY = $lowResY; $scale = 100; $texQ = 1; $aaQ = 0
+            } else {
+                $resX = $nativeCapW; $resY = $nativeCapH; $scale = 70; $texQ = 1; $aaQ = 0
+            }
+        }
+        "PerfSharp" {
+            $resX = 1280; $resY = $lowResY; $scale = 100; $texQ = 1; $aaQ = 0
+        }
+        "BalancedPlus" {
+            if ($is16By10) {
+                $resX = 1680; $resY = 1050; $scale = 80; $texQ = 1; $aaQ = 0
+            } else {
+                $resX = 1600; $resY = 900; $scale = 85; $texQ = 1; $aaQ = 0
+            }
+        }
+        "HighClarity" {
+            if ($is16By10) {
+                $resX = $nativeCapW; $resY = $nativeCapH; $scale = 75; $texQ = 1; $aaQ = 0
+            } else {
+                $resX = $nativeCapW; $resY = $nativeCapH; $scale = 80; $texQ = 1; $aaQ = 0
+            }
+        }
+        "UltraPerf" {
+            $resX = 1280; $resY = $lowResY; $scale = 80; $texQ = 0; $aaQ = 0
+        }
+        default {
+            $resX = if ($RequestedResX -gt 0) { $RequestedResX } else { 1280 }
+            $resY = if ($RequestedResY -gt 0) { $RequestedResY } else { $lowResY }
+            $scale = if ($RequestedScale -gt 0) { $RequestedScale } else { 80 }
+            $texQ = 1; $aaQ = 0
+        }
+    }
+
+    if ($RequestedResX -gt 0 -and $RequestedResY -gt 0) { $resX = $RequestedResX; $resY = $RequestedResY }
+    if ($RequestedScale -gt 0) { $scale = $RequestedScale }
+    if ($RequestedTextureQuality -ge 0) { $texQ = [math]::Min(4, $RequestedTextureQuality) }
+    if ($RequestedAntiAliasingQuality -ge 0) { $aaQ = [math]::Min(4, $RequestedAntiAliasingQuality) }
+
+    $desired3dW = ($resX * $scale) / 100.0
+    if ($CanCheckRes -and -not [PubgIrisXeNative]::IsDisplayResolutionSupported($resX, $resY)) {
+        if ($resX -ge 1366) {
+            if ([PubgIrisXeNative]::IsDisplayResolutionSupported($nativeCapW, $nativeCapH)) {
+                $resX = $nativeCapW; $resY = $nativeCapH
+                if ($RequestedScale -le 0) {
+                    $scale = [int][math]::Round(($desired3dW / [double]$resX) * 100.0)
+                }
+            } elseif ($is16By10 -and [PubgIrisXeNative]::IsDisplayResolutionSupported(1680, 1050)) {
+                $resX = 1680; $resY = 1050
+                if ($RequestedScale -le 0) {
+                    $scale = [int][math]::Round(($desired3dW / [double]$resX) * 100.0)
+                }
+            } elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1366, 768)) {
+                $resX = 1366; $resY = 768
+                if ($RequestedScale -le 0) {
+                    $scale = [int][math]::Round(($desired3dW / [double]$resX) * 100.0)
+                }
+            } elseif ($is16By10 -and [PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800)) {
+                $resX = 1280; $resY = 800
+                if ($RequestedScale -le 0) { $scale = 100 }
+            } elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 720)) {
+                $resX = 1280; $resY = 720
+                if ($RequestedScale -le 0) { $scale = 100 }
+            }
+        } else {
+            if ($is16By10 -and [PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800)) { $resX = 1280; $resY = 800 }
+            elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 720)) { $resX = 1280; $resY = 720 }
+            elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800)) { $resX = 1280; $resY = 800 }
+            elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1366, 768)) { $resX = 1366; $resY = 768 }
+            else { $resX = $DeskW; $resY = $DeskH }
+        }
+    }
+
+    $clampedScale = [math]::Max(70, [math]::Min(100, $scale))
+    $internalX = [int][math]::Round(($resX * $clampedScale) / 100.0)
+    $internalY = [int][math]::Round(($resY * $clampedScale) / 100.0)
+    $scalingMode = if ($resX -eq $DeskW -and $resY -eq $DeskH -and $clampedScale -eq 100) {
+        "Zero-Scale Native (1:1 3D + 1:1 UI)"
+    } elseif ($resX -eq $DeskW -and $resY -eq $DeskH) {
+        "Single-Pass UE4 Upscale (1:1 Native UI/Scopes, 0 Display Stretch)"
+    } elseif ($DeskW -gt 1920 -and $resX -eq $nativeCapW -and $resY -eq $nativeCapH -and $clampedScale -eq 100) {
+        "FHD/WUXGA Cap 1:1 (${resX}x${resY} 1:1 3D+UI on ${DeskW}x${DeskH} Panel)"
+    } elseif ($DeskW -gt 1920 -and $resX -eq $nativeCapW -and $resY -eq $nativeCapH) {
+        "Single-Pass UE4 Upscale @ FHD/WUXGA Cap (${resX}x${resY} 1:1 UI/Scopes on ${DeskW}x${DeskH} Panel)"
+    } elseif ($clampedScale -eq 100) {
+        "Single-Pass Display Stretch (1:1 3D-to-HUD, 0 UE4 Upscale)"
+    } else {
+        "Double-Pass Scaling (UE4 Upscale + Display Stretch)"
+    }
+
+    return [PSCustomObject]@{
+        AppliedPreset              = $effectivePreset
+        AppliedResolutionX         = $resX
+        AppliedResolutionY         = $resY
+        AppliedScreenScale         = $clampedScale
+        InternalRenderX            = $internalX
+        InternalRenderY            = $internalY
+        AppliedTextureQuality      = $texQ
+        AppliedAntiAliasingQuality = $aaQ
+        ScalingMode                = $scalingMode
+    }
+}
+Set-Alias -Name Resolve-IrisXeQualityPreset -Value Resolve-PubgQualityPreset -Scope Global -ErrorAction SilentlyContinue
+
 function Optimize-PubgIniFiles {
     param(
-        [string]$TargetConfigDir = "$env:LOCALAPPDATA\TslGame\Saved\Config\WindowsNoEditor", [string]$TargetGraphicsAPI = "DX11",
-        [int]$TargetResX = 0, [int]$TargetResY = 0, [int]$TargetScale = 80, [int]$TargetFpsCap = 60, [bool]$TurnOffHrtf = $false,
+        [Alias("IniDir", "ConfigDir")][string]$TargetConfigDir = "$env:LOCALAPPDATA\TslGame\Saved\Config\WindowsNoEditor", [string]$TargetGraphicsAPI = "DX11",
+        [int]$TargetResX = 0, [int]$TargetResY = 0, [Alias("RenderScale", "ScreenScale")][int]$TargetScale = 0, [int]$TargetFpsCap = 60, [bool]$TurnOffHrtf = $false,
+        [string]$QualityPreset = "NativeCrisp", [int]$TargetTextureQuality = -1, [int]$TargetAntiAliasingQuality = -1,
+        [double]$PeakBandwidthGBs = 83.2,
         [bool]$IsDryRun = ([bool](Get-Variable -Name DryRun -ValueOnly -ErrorAction SilentlyContinue))
     )
     $inv          = [System.Globalization.CultureInfo]::InvariantCulture
     $utf8NoBom    = New-Object System.Text.UTF8Encoding($false)
-    $clampedScale = [math]::Max(70, [math]::Min(100, $TargetScale))
     $fpsCapVal    = if ($TargetFpsCap -gt 0) { $TargetFpsCap } else { 60 }
-    $scaleStr     = $clampedScale.ToString("F6", $inv)
     $fpsStr       = $fpsCapVal.ToString("F6", $inv)
 
     $deskW = 1920; $deskH = 1080
@@ -68,16 +205,18 @@ function Optimize-PubgIniFiles {
             }
         }
     }
-    $is16By10 = (($deskW * 10) -eq ($deskH * 16))
-    $autoResY = if ($is16By10 -and (-not $canCheckRes -or [PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800))) { 800 } else { 720 }
-    if ($TargetResX -le 0 -or $TargetResY -le 0) { $effectiveResX = 1280; $effectiveResY = $autoResY } else { $effectiveResX = $TargetResX; $effectiveResY = $TargetResY }
-    if ($canCheckRes -and -not [PubgIrisXeNative]::IsDisplayResolutionSupported($effectiveResX, $effectiveResY)) {
-        if ($is16By10 -and [PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800)) { $effectiveResX = 1280; $effectiveResY = 800 }
-        elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 720)) { $effectiveResX = 1280; $effectiveResY = 720 }
-        elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800)) { $effectiveResX = 1280; $effectiveResY = 800 }
-        elseif ([PubgIrisXeNative]::IsDisplayResolutionSupported(1366, 768)) { $effectiveResX = 1366; $effectiveResY = 768 }
-        else { $effectiveResX = $deskW; $effectiveResY = $deskH }
-    }
+
+    $resolved = Resolve-PubgQualityPreset -Preset $QualityPreset -DeskW $deskW -DeskH $deskH `
+        -RequestedResX $TargetResX -RequestedResY $TargetResY -RequestedScale $TargetScale `
+        -RequestedTextureQuality $TargetTextureQuality -RequestedAntiAliasingQuality $TargetAntiAliasingQuality `
+        -PeakBandwidthGBs $PeakBandwidthGBs -CanCheckRes $canCheckRes
+
+    $effectiveResX = $resolved.AppliedResolutionX
+    $effectiveResY = $resolved.AppliedResolutionY
+    $clampedScale  = $resolved.AppliedScreenScale
+    $texQualityVal = $resolved.AppliedTextureQuality
+    $aaQualityVal  = $resolved.AppliedAntiAliasingQuality
+    $scaleStr      = $clampedScale.ToString("F6", $inv)
 
     $engineIni = Join-Path $TargetConfigDir "Engine.ini"
     $gusIni    = Join-Path $TargetConfigDir "GameUserSettings.ini"
@@ -125,8 +264,9 @@ function Optimize-PubgIniFiles {
                 if ($engExists) { try { [System.IO.File]::SetAttributes($engineIni, $curEngAttr) } catch {} }
                 if ($gusExists) { try { [System.IO.File]::SetAttributes($gusIni, $curGusAttr) } catch {} }
                 return [PSCustomObject]@{
-                    EngineUpdated = $false; GusUpdated = $false; AppliedResolutionX = $effectiveResX; AppliedResolutionY = $effectiveResY
+                    EngineUpdated = $false; GusUpdated = $false; AppliedPreset = $resolved.AppliedPreset; AppliedResolutionX = $effectiveResX; AppliedResolutionY = $effectiveResY
                     AppliedScreenScale = $clampedScale; InternalRenderX = [int][math]::Round(($effectiveResX * $clampedScale) / 100.0); InternalRenderY = [int][math]::Round(($effectiveResY * $clampedScale) / 100.0)
+                    AppliedTextureQuality = $texQualityVal; AppliedAntiAliasingQuality = $aaQualityVal; ScalingMode = $resolved.ScalingMode
                 }
             }
 
@@ -232,14 +372,16 @@ function Optimize-PubgIniFiles {
                     $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "/Script/TslGame.TslGameUserSettings" -Key $kv.Key -Value $kv.Value
                 }
 
-                # TslPersistantData duplicates bUseKillCam, bUseLiveStreaming, and bIsEnabledHrtfRemoteWeaponSound and overrides top-level keys on load.
+                # TslPersistantData duplicates bUseKillCam, bUseLiveStreaming, bIsEnabledHrtfRemoteWeaponSound, and bUseTAA and overrides top-level keys on load.
+                $taaToken = if ($aaQualityVal -ge 2) { "True" } else { "False" }
                 $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbUseKillCam=)(True|False)', '${1}False')
                 $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbUseLiveStreaming=)(True|False)', '${1}False')
                 $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbIsEnabledHrtfRemoteWeaponSound=)(True|False)', "`${1}$hrtfToken")
+                $rawGus = [regex]::Replace($rawGus, '(?mi)(^TslPersistantData=[^\r\n]*?\bbUseTAA=)(True|False)', "`${1}$taaToken")
 
                 $scalabilityTable = [ordered]@{
-                    "sg.ResolutionQuality" = $scaleStr; "sg.ViewDistanceQuality" = "0"; "sg.AntiAliasingQuality" = "0"; "sg.ShadowQuality" = "0"
-                    "sg.PostProcessQuality" = "0"; "sg.TextureQuality" = "0"; "sg.EffectsQuality" = "0"; "sg.FoliageQuality" = "0"; "sg.ShadingQuality" = "0"; "sg.VSyncQuality" = "0"
+                    "sg.ResolutionQuality" = $scaleStr; "sg.ViewDistanceQuality" = "0"; "sg.AntiAliasingQuality" = "$aaQualityVal"; "sg.ShadowQuality" = "0"
+                    "sg.PostProcessQuality" = "0"; "sg.TextureQuality" = "$texQualityVal"; "sg.EffectsQuality" = "0"; "sg.FoliageQuality" = "0"; "sg.ShadingQuality" = "0"; "sg.VSyncQuality" = "0"
                 }
                 foreach ($kv in $scalabilityTable.GetEnumerator()) {
                     $rawGus = Set-IniKeyValueInSection -Content $rawGus -SectionHeader "ScalabilityGroups" -Key $kv.Key -Value $kv.Value
@@ -261,13 +403,14 @@ function Optimize-PubgIniFiles {
     }
 
     return [PSCustomObject]@{
-        EngineUpdated = $engineUpdated; GusUpdated = $gusUpdated; AppliedResolutionX = $effectiveResX; AppliedResolutionY = $effectiveResY
+        EngineUpdated = $engineUpdated; GusUpdated = $gusUpdated; AppliedPreset = $resolved.AppliedPreset; AppliedResolutionX = $effectiveResX; AppliedResolutionY = $effectiveResY
         AppliedScreenScale = $clampedScale; InternalRenderX = [int][math]::Round(($effectiveResX * $clampedScale) / 100.0); InternalRenderY = [int][math]::Round(($effectiveResY * $clampedScale) / 100.0)
+        AppliedTextureQuality = $texQualityVal; AppliedAntiAliasingQuality = $aaQualityVal; ScalingMode = $resolved.ScalingMode
     }
 }
 
 function Restore-PubgIniFiles {
-    param([string]$TargetConfigDir = "$env:LOCALAPPDATA\TslGame\Saved\Config\WindowsNoEditor", [bool]$IsDryRun = ([bool](Get-Variable -Name DryRun -ValueOnly -ErrorAction SilentlyContinue)))
+    param([Alias("IniDir", "ConfigDir")][string]$TargetConfigDir = "$env:LOCALAPPDATA\TslGame\Saved\Config\WindowsNoEditor", [bool]$IsDryRun = ([bool](Get-Variable -Name DryRun -ValueOnly -ErrorAction SilentlyContinue)))
     $engineIni = Join-Path $TargetConfigDir "Engine.ini"
     $gusIni    = Join-Path $TargetConfigDir "GameUserSettings.ini"
     $engineBak = "$engineIni.irisxe.bak"

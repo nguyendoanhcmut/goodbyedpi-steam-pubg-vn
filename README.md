@@ -21,8 +21,8 @@ Bộ công cụ vượt chặn **Steam** và sửa lỗi treo **`INITIALIZING...
    - **Nạp trước `TslGame.exe` vào RAM Page Cache & `IFEO` High Priority tại `t = 0 ms`**: Giảm thời gian đọc lặp 12 lần (`2.78 GB`) của `BEService.exe`, tự động đổi tên `Content\Movies\*.mp4 -> *.mp4.bak` khi Steam cập nhật và dọn thư mục `Saved\Demos` quá 14 ngày.
 5. **Bộ tối ưu chuyên biệt cho Laptop Intel Iris Xe (`TOI_UU_PUBG_IRIS_XE.cmd` & `pubg_iris_xe_boost.ps1`)**
    - Thiết kế riêng cho laptop văn phòng dùng iGPU chia sẻ RAM (như **Dell Latitude 3450 `i7-1355U + Intel Iris Xe 96 EU + 16GB DDR5`**).
-   - Tự động chọn độ phân giải toàn màn hình chuẩn tỉ lệ màn hình (`1280x720` cho `16:9` hoặc `1280x800` cho `16:10`) qua Windows 11 `iFlip` (`Scaling=3`, không viền đen, không lệch chuột), ép `DX11` + `ScreenScale=80%`, tạo gói nguồn `PUBG Iris Xe Boost` giới hạn nhân P `3700 MHz` / nhân E `2800 MHz` để nhường `10–12 W` điện cho iGPU giữ xung `1200–1300 MHz`.
-   - Áp dụng kỹ thuật mã nguồn mở từ `System Informer`, `EnergyStar`, `TimerResolution`, `MemReduct` và `pse-powertuner`: bật `EcoQoS` (`0x5`) + ghim 8 nhân E (`0xFF0`) cho ứng dụng nền, giữ xung đồng hồ hệ thống `0.5 ms` (`NtSetTimerResolution`), xả `Modified + Standby RAM` trước trận và **tự động khôi phục 100% về gói nguồn `Balanced` văn phòng ngay khi đóng game**.
+   - Tích hợp bảng Menu chọn nhanh 5 chế độ độ phân giải (`[1] NativeCrisp` Full HD `1080p/1200p @ 70% Scale` + `Texture Low` tâm ngắm nét `1:1`; `[2] HighClarity` `1080p/1200p @ 80% Scale`; `[3] BalancedPlus` `1600x900 @ 85%`; `[4] PerfSharp` `720p @ 100%`; `[5] UltraPerf` `720p @ 80%`), tạo gói nguồn `PUBG Iris Xe Boost` giới hạn nhân P `3700 MHz` / nhân E `2800 MHz` để nhường `10–12 W` điện cho iGPU giữ xung `1200–1300 MHz`.
+   - Áp dụng kỹ thuật mã nguồn mở từ `System Informer`, `EnergyStar`, `TimerResolution`, `MemReduct` và `pse-powertuner`: bật `EcoQoS` (`0x5`) + ghim 8 nhân E (`0xFF0`) cho ứng dụng nền, giữ xung đồng hồ hệ thống `0.5 ms` (`NtSetTimerResolution`), xả `Modified + Standby RAM` trước trận, tắt `QuickEdit` chống đứng màn hình và **tự động khôi phục 100% về gói nguồn `Balanced` văn phòng ngay khi đóng game**.
 
 ---
 

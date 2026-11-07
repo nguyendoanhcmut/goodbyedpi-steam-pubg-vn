@@ -390,8 +390,21 @@ function Restore-RegistryValueSnapshot {
             return $true
         }
         $kind = if ($Snap.Kind) { [string]$Snap.Kind } else { "DWord" }
-        return (Set-RegistryValueSafely -Path $Snap.Path -Name $Snap.Name -Value $Snap.Value -Type $kind -IsDryRun $IsDryRun)
+        if (Set-RegistryValueSafely -Path $Snap.Path -Name $Snap.Name -Value $Snap.Value -Type $kind -IsDryRun $IsDryRun) {
+            return $true
+        }
+        $cur = Get-RegistryValueSnapshot -Path $Snap.Path -Name $Snap.Name
+        if ($cur.KeyExisted -and $cur.ValueExisted -and ([string]$cur.Value -eq [string]$Snap.Value)) {
+            return $true
+        }
+        return $false
     } catch {
+        try {
+            $cur = Get-RegistryValueSnapshot -Path $Snap.Path -Name $Snap.Name
+            if (-not $Snap.KeyExisted -and -not $cur.KeyExisted) { return $true }
+            if (-not $Snap.ValueExisted -and -not $cur.ValueExisted) { return $true }
+            if ($Snap.ValueExisted -and $cur.ValueExisted -and ([string]$cur.Value -eq [string]$Snap.Value)) { return $true }
+        } catch {}
         return $false
     }
 }

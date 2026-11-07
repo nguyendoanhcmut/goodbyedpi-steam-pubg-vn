@@ -2,6 +2,30 @@ $ErrorActionPreference = 'SilentlyContinue'
 $baseDir = $PSScriptRoot
 $inv = [System.Globalization.CultureInfo]::InvariantCulture
 $curlExe = if ([System.IO.File]::Exists("$env:SystemRoot\System32\curl.exe")) { "$env:SystemRoot\System32\curl.exe" } else { "curl.exe" }
+if (-not ("PubgAutofixNative" -as [type])) {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class PubgAutofixNative {
+    private const int STD_INPUT_HANDLE = -10;
+    private const uint ENABLE_QUICK_EDIT_MODE = 0x0040U;
+    private const uint ENABLE_EXTENDED_FLAGS = 0x0080U;
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+    public static bool DisableConsoleQuickEdit() {
+        IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
+        if (hIn == IntPtr.Zero || hIn == new IntPtr(-1)) return false;
+        uint mode = 0;
+        if (!GetConsoleMode(hIn, out mode)) return false;
+        return SetConsoleMode(hIn, (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+    }
+}
+"@ -Language CSharp -ErrorAction SilentlyContinue
+    } catch {}
+}
+try { [void][PubgAutofixNative]::DisableConsoleQuickEdit() } catch {}
 
 function Get-HklmValue {
     param([string]$SubKey, [string]$ValueName)
@@ -847,44 +871,6 @@ try {
             if (Write-HostsSafely -Path $hostsPath -Lines $cleanLines) { & ipconfig.exe /flushdns | Out-Null }
         }
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

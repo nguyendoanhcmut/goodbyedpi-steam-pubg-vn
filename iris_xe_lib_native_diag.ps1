@@ -11,6 +11,9 @@ public static class PubgIrisXeNative {
     private const uint SE_PRIVILEGE_ENABLED = 0x00000002;
     private const int RelationProcessorCore = 0;
     private const int ENUM_CURRENT_SETTINGS = -1;
+    private const int STD_INPUT_HANDLE = -10;
+    private const uint ENABLE_QUICK_EDIT_MODE = 0x0040U;
+    private const uint ENABLE_EXTENDED_FLAGS = 0x0080U;
     public const int ProcessPowerThrottling = 4;
     public const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
     public const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
@@ -73,7 +76,19 @@ public static class PubgIrisXeNative {
     [DllImport("powrprof.dll")] public static extern uint PowerWriteACValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint AcValueIndex);
     [DllImport("powrprof.dll")] public static extern uint PowerWriteDCValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint DcValueIndex);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetLogicalProcessorInformationEx(int RelationshipType, IntPtr Buffer, ref uint ReturnedLength);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
     [DllImport("user32.dll", CharSet = CharSet.Ansi)] private static extern bool EnumDisplaySettingsA(string lpszDeviceName, int iModeNum, ref DEVMODEA lpDevMode);
+
+    public static bool DisableConsoleQuickEdit() {
+        IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
+        if (hIn == IntPtr.Zero || hIn == new IntPtr(-1)) return false;
+        uint mode = 0;
+        if (!GetConsoleMode(hIn, out mode)) return false;
+        uint newMode = (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
+        return SetConsoleMode(hIn, newMode);
+    }
 
     public static bool SetEcoQoSAndTimerThrottle(IntPtr hProcess, uint controlMask, uint stateMask) {
         PROCESS_POWER_THROTTLING_STATE state = new PROCESS_POWER_THROTTLING_STATE { Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask = controlMask, StateMask = stateMask };
@@ -150,6 +165,13 @@ public static class PubgIrisXeNative {
         int deskW, deskH;
         GetCurrentDesktopResolution(out deskW, out deskH);
         bool is16By10 = (deskW > 0 && deskH > 0 && (deskW * 10 == deskH * 16));
+        if (requestedX >= 1366) {
+            if (deskW > 0 && deskH > 0 && deskW <= 1920 && IsDisplayResolutionSupported(deskW, deskH)) { outX = deskW; outY = deskH; return true; }
+            if (is16By10 && IsDisplayResolutionSupported(1920, 1200)) { outX = 1920; outY = 1200; return true; }
+            if (is16By10 && IsDisplayResolutionSupported(1680, 1050)) { outX = 1680; outY = 1050; return true; }
+            if (IsDisplayResolutionSupported(1920, 1080)) { outX = 1920; outY = 1080; return true; }
+            if (IsDisplayResolutionSupported(1366, 768)) { outX = 1366; outY = 768; return true; }
+        }
         if (is16By10 && IsDisplayResolutionSupported(1280, 800)) { outX = 1280; outY = 800; return true; }
         if (IsDisplayResolutionSupported(1280, 720)) { outX = 1280; outY = 720; return true; }
         if (IsDisplayResolutionSupported(1280, 800)) { outX = 1280; outY = 800; return true; }
