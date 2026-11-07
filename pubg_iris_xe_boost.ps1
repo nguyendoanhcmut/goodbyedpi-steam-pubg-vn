@@ -7,7 +7,7 @@ param(
     [switch]$DisableHrtf,
     [switch]$DisableMpo,
     [ValidateSet("DX11", "DX11_Enhanced")][string]$GraphicsAPI = "DX11",
-    [ValidateSet("NativeCrisp", "PerfSharp", "BalancedPlus", "HighClarity", "UltraPerf", "Custom")][string]$QualityPreset = "NativeCrisp",
+    [ValidateSet("NativeCrisp", "PerfSharp", "BalancedPlus", "HighClarity", "UltraPerf", "Custom", "1", "2", "3", "4", "5")][string]$QualityPreset = "NativeCrisp",
     [int]$ResolutionX = 0,
     [int]$ResolutionY = 0,
     [ValidateRange(0, 100)][int]$ScreenScale = 0,
@@ -93,6 +93,13 @@ try {
             default { $QualityPreset = "NativeCrisp" }
         }
         Write-Host "  -> Da chon che do: $QualityPreset" -ForegroundColor Green
+    }
+    switch ($QualityPreset) {
+        "1" { $QualityPreset = "NativeCrisp" }
+        "2" { $QualityPreset = "HighClarity" }
+        "3" { $QualityPreset = "BalancedPlus" }
+        "4" { $QualityPreset = "PerfSharp" }
+        "5" { $QualityPreset = "UltraPerf" }
     }
 
     $hw = Test-SystemHardwareAndMemory

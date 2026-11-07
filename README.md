@@ -7,7 +7,7 @@ Bộ công cụ vượt chặn **Steam** và sửa lỗi treo **`INITIALIZING...
 ## Các cải tiến trong bản v2.5 (Patch-Proof Self-Healing + Intel Iris Xe Optimizer)
 
 1. **Cài đặt 1-Click & Điều khiển thủ công hiển thị trạng thái trực tiếp (`CAI_DAT_1_CLICK.cmd`)**
-   - Chép bộ công cụ vào `C:\Tools\goodbyedpi-0.2.3rc3-2` và tạo 2 nút ngoài Desktop gồm **`GoodbyeDPI BAT`** và **`GoodbyeDPI TAT`** (giữ chế độ `DEMAND_START` để người dùng chủ động bật/tắt bằng tay, cửa sổ giữ nguyên hiển thị trạng thái `Service`, `WinDivert`, `Lobby CDN IP` cho tới khi nhấn `Enter`).
+   - Chép bộ công cụ vào `C:\Tools\goodbyedpi-0.2.3rc3-2` và tạo 3 nút ngoài Desktop gồm **`GoodbyeDPI BAT`**, **`GoodbyeDPI TAT`** và **`TOI UU PUBG IRIS XE`** (giữ chế độ `DEMAND_START` để người dùng chủ động bật/tắt bằng tay, cửa sổ giữ nguyên hiển thị trạng thái `Service`, `WinDivert`, `Lobby CDN IP` cho tới khi nhấn `Enter`).
    - Nhận diện mọi card mạng vật lý và card phát sóng di động (`WiFi`, `Wi-Fi`, `Ethernet`, `Remote NDIS / USB Tethering`) và bỏ qua các card VPN ảo (`Tailscale`, `WireGuard`, `ZeroTier`, `Hyper-V`).
 2. **Phân mảnh TLS 2-Byte thuận chiều (`--native-frag --allow-no-sni --max-payload 1200`) cho Steam Chromium 126**
    - Chạy cấu hình `-p -r -s -f 2 -k 2 -n -e 2 --native-frag --allow-no-sni --max-payload 1200` để cắt gói `TLS 1.3 ClientHello` tại byte thứ 2 sau `0x16 0x03` theo thứ tự thuận, không tiêm gói giả sai checksum hay lệch sequence (tương thích với cả lớp NAT kép trên Hotspot và CGNAT MobiFone 4G/5G).
@@ -41,16 +41,17 @@ powershell -c "irm https://github.com/nguyendoanhcmut/goodbyedpi-steam-pubg-vn/r
 ### Cách 2 (Tải file `.zip` thủ công)
 1. Tải bản đóng gói `.zip` trong mục **Releases** (hoặc clone repo này về máy) và giải nén ra thư mục bất kỳ.
 2. Nhấp chuột phải vào **`CAI_DAT_1_CLICK.cmd`** và chọn **Run as administrator** (Chạy với quyền quản trị).
-3. Trên Desktop sẽ xuất hiện 2 nút bấm.
+3. Trên Desktop sẽ xuất hiện 3 nút bấm.
    - **`GoodbyeDPI BAT`** dùng để bật dịch vụ ngầm, cấu hình DNS/DoH, đua tốc độ song song CDN sảnh PUBG và in bảng kiểm tra kết nối (`HTTP 200`/`206`).
    - **`GoodbyeDPI TAT`** dùng để dừng dịch vụ ngầm (không tự bật lại khi khởi động máy), trả DNS về DHCP cho cả IPv4/IPv6 (kể cả trên các card mạng vừa rút dây), dọn khóa Registry DoH và gỡ dòng ghim trong `hosts`.
+   - **`TOI UU PUBG IRIS XE`** dùng để mở bảng chọn 5 chế độ độ phân giải và kích hoạt gói tối ưu PUBG cho iGPU (tự động khôi phục 100% về gói nguồn `Balanced` ngay khi đóng game).
 
 ### Cách 3 (Dành riêng cho Laptop Intel Iris Xe - Dell Latitude 3450 `i7-1355U`)
-- Nhấp đúp vào **`C:\Tools\goodbyedpi-0.2.3rc3-2\TOI_UU_PUBG_IRIS_XE.cmd`** trước khi mở PUBG để kích hoạt chế độ tối ưu iGPU (giữ cửa sổ `[SESSION GUARD]` mở trong lúc chơi; khi đóng game hoặc tắt cửa sổ, máy tự động trả lại gói nguồn `Balanced` văn phòng trong `< 0.5 giây`).
+- Nhấp đúp vào nút **`TOI UU PUBG IRIS XE`** ngoài Desktop (hoặc chạy `C:\Tools\goodbyedpi-0.2.3rc3-2\TOI_UU_PUBG_IRIS_XE.cmd`) trước khi mở PUBG để chọn chế độ độ phân giải (`1..5`) và kích hoạt chế độ tối ưu iGPU (giữ cửa sổ `[SESSION GUARD]` mở trong lúc chơi; khi đóng game hoặc tắt cửa sổ, máy tự động trả lại gói nguồn `Balanced` văn phòng trong `< 0.5 giây`).
 - Để hoàn tác toàn bộ cấu hình `.ini` và Registry về mặc định bất cứ lúc nào: chạy `TOI_UU_PUBG_IRIS_XE.cmd -Restore` (hoặc chạy kiểm thử không ghi file bằng `TOI_UU_PUBG_IRIS_XE.cmd -DryRun`).
 
 ### Cách 4 (Gỡ cài đặt GoodbyeDPI)
-- Nhấp chuột phải vào **`service_remove.cmd`** và chọn **Run as administrator** để xóa dịch vụ `GoodbyeDPI`, driver `WinDivert`, tác vụ tự động, 2 nút ngoài Desktop, khôi phục DNS DHCP và trả lại file `hosts` nguyên bản.
+- Nhấp chuột phải vào **`service_remove.cmd`** và chọn **Run as administrator** để xóa dịch vụ `GoodbyeDPI`, driver `WinDivert`, tác vụ tự động, 3 nút ngoài Desktop, khôi phục DNS DHCP và trả lại file `hosts` nguyên bản.
 
 ---
 

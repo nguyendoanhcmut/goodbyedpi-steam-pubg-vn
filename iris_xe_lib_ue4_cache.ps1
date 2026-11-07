@@ -64,7 +64,14 @@ function Resolve-PubgQualityPreset {
     }
     $lowResY = if ($is16By10 -and (-not $CanCheckRes -or [PubgIrisXeNative]::IsDisplayResolutionSupported(1280, 800))) { 800 } else { 720 }
 
-    $effectivePreset = if ([string]::IsNullOrWhiteSpace($Preset)) { "NativeCrisp" } else { $Preset }
+    $effectivePreset = if ([string]::IsNullOrWhiteSpace($Preset)) { "NativeCrisp" } else { $Preset.Trim() }
+    switch ($effectivePreset) {
+        "1" { $effectivePreset = "NativeCrisp" }
+        "2" { $effectivePreset = "HighClarity" }
+        "3" { $effectivePreset = "BalancedPlus" }
+        "4" { $effectivePreset = "PerfSharp" }
+        "5" { $effectivePreset = "UltraPerf" }
+    }
     if ($RequestedResX -gt 0 -and $RequestedResY -gt 0 -and $effectivePreset -eq "NativeCrisp") {
         # Caller explicitly provided TargetResX/TargetResY without changing Preset; treat as Custom override for backward compatibility.
         $effectivePreset = "Custom"
