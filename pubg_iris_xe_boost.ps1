@@ -7,7 +7,7 @@ param(
     [switch]$DisableHrtf,
     [switch]$DisableMpo,
     [ValidateSet("DX11", "DX11_Enhanced")][string]$GraphicsAPI = "DX11",
-    [ValidateSet("NativeCrisp", "PerfSharp", "BalancedPlus", "HighClarity", "UltraPerf", "Custom", "1", "2", "3", "4", "5")][string]$QualityPreset = "NativeCrisp",
+    [Parameter(Position = 0)][Alias("Preset", "Mode")][ValidateSet("NativeCrisp", "PerfSharp", "BalancedPlus", "HighClarity", "UltraPerf", "Custom", "1", "2", "3", "4", "5")][string]$QualityPreset = "NativeCrisp",
     [int]$ResolutionX = 0,
     [int]$ResolutionY = 0,
     [ValidateRange(0, 100)][int]$ScreenScale = 0,
@@ -76,14 +76,37 @@ try {
     if ($isDry) { Write-Host " [CHE DO DRY-RUN: CHI KIEM TRA VA BAO CAO, KHONG GHI THAY DOI]" -ForegroundColor Yellow }
     Write-Host "=========================================================================" -ForegroundColor Cyan
 
-    if (-not $NoWait -and -not $isDry -and -not $PSBoundParameters.ContainsKey("QualityPreset") -and $ResolutionX -le 0 -and $ScreenScale -le 0 -and -not [Console]::IsInputRedirected) {
-        Write-Host "`n Chon Che Do Do Phan Giai & Do Net (Nhan so 1..5 roi Enter, hoac nhan Enter de chon [1]):" -ForegroundColor Yellow
+    $hasPipedInput = [Console]::IsInputRedirected -and (([Console]::In.GetType().Name -match 'StringReader') -or [PubgIrisXeNative]::HasRedirectedStdinData())
+    if (-not $NoWait -and (-not $isDry -or $hasPipedInput) -and -not $PSBoundParameters.ContainsKey("QualityPreset") -and $ResolutionX -le 0 -and $ScreenScale -le 0 -and (-not [Console]::IsInputRedirected -or $hasPipedInput)) {
+        Write-Host "`n Chon Che Do Do Phan Giai & Do Net (Bam phim so [1]..[5] hoac [Enter] = [1]):" -ForegroundColor Yellow
         Write-Host "   [1] NativeCrisp  (Khuyen dung) : Full HD 1080p/1200p @ 70% Scale + Texture Low (Tam ngam net 1:1, ~52-60 FPS)" -ForegroundColor Green
         Write-Host "   [2] HighClarity  (Sieu net)    : Full HD 1080p/1200p @ 80% Scale + Texture Low (Nhieu hon +125% diem anh 3D, ~45-53 FPS)" -ForegroundColor Cyan
         Write-Host "   [3] BalancedPlus (Can bang)    : 1600x900 / 1680x1050 @ 85% Scale + Texture Low (~52-59 FPS)" -ForegroundColor White
         Write-Host "   [4] PerfSharp    (720p 100%)   : 1280x720 / 1280x800  @ 100% Scale + Texture Low (Khong keo gian kep, ~56-60 FPS)" -ForegroundColor White
         Write-Host "   [5] UltraPerf    (Ban cu)      : 1280x720 / 1280x800  @ 80% Scale + Texture Very Low (Nhe nhat, ~60 FPS)" -ForegroundColor DarkGray
-        $rawChoice = Read-Host " Lua chon cua ban [Mac dinh = 1]"
+        $rawChoice = $null
+        if ([Console]::IsInputRedirected) {
+            $rawChoice = [Console]::In.ReadLine()
+        } else {
+            try {
+                Write-Host -NoNewline " Bam phim [1..5] hoac [Enter = 1] (1 cham, khong can nhan Enter sau khi bam so): " -ForegroundColor Yellow
+                while ($true) {
+                    $kStart = [Console]::ReadKey($true)
+                    if ($kStart.Key -eq [ConsoleKey]::Enter -or $kStart.Key -eq [ConsoleKey]::Spacebar) {
+                        $rawChoice = "1"
+                        Write-Host "1 (Mac dinh)" -ForegroundColor Green
+                        break
+                    }
+                    if ($kStart.KeyChar -in @('1','2','3','4','5')) {
+                        $rawChoice = [string]$kStart.KeyChar
+                        Write-Host $rawChoice -ForegroundColor Green
+                        break
+                    }
+                }
+            } catch {
+                $rawChoice = Read-Host " Lua chon cua ban [Mac dinh = 1]"
+            }
+        }
         $choice = if ($null -ne $rawChoice) { ([string]$rawChoice).Trim() } else { "" }
         switch ($choice) {
             "2" { $QualityPreset = "HighClarity" }
@@ -267,10 +290,37 @@ try {
         Write-Host "  [+] Session Guard: Da tu dong khoi phuc Power Scheme ($savedSchemeGuid), CPU Affinity, Services, Registry & INI!" -ForegroundColor Green
     }
 
+    function Show-IrisXeSessionPresetMenu {
+        param([string]$ActivePreset, [double]$BandwidthGBs)
+        $deskW = 1920; $deskH = 1080
+        try { [void][PubgIrisXeNative]::GetCurrentDesktopResolution([ref]$deskW, [ref]$deskH) } catch {}
+        Write-Host "`n-------------------------------------------------------------------------" -ForegroundColor DarkCyan
+        Write-Host " [BANG DOI NHANH 5 CHE DO DO HOA IRIS XE - BAM PHIM SO 1..5 NGAY TAI DAY]" -ForegroundColor Yellow
+        $presetRows = @(
+            @{ Key = "1"; Name = "NativeCrisp";  Tag = "Khuyen dung - Tam ngam 1:1 net nhat (~52-60 FPS)" }
+            @{ Key = "2"; Name = "HighClarity";  Tag = "Sieu net nhin xa +125% diem anh 3D (~45-53 FPS)" }
+            @{ Key = "3"; Name = "BalancedPlus"; Tag = "Can bang khung hinh & do net (~52-59 FPS)" }
+            @{ Key = "4"; Name = "PerfSharp";    Tag = "720p/800p @ 100% Scale khong upscale (~56-60 FPS)" }
+            @{ Key = "5"; Name = "UltraPerf";    Tag = "720p/800p @ 80% Scale nhe nhat (~60 FPS)" }
+        )
+        foreach ($row in $presetRows) {
+            $pInfo = Resolve-PubgQualityPreset -Preset $row.Name -DeskW $deskW -DeskH $deskH -PeakBandwidthGBs $BandwidthGBs -CanCheckRes $true
+            $texLabel = if ($pInfo.AppliedTextureQuality -ge 1) { "Tex:Low" } else { "Tex:VeryLow" }
+            $isCurrent = ($ActivePreset -ieq $row.Name) -or ($ActivePreset -ieq $row.Key)
+            $marker = if ($isCurrent) { " << [DANG DUNG]" } else { "" }
+            $color  = if ($isCurrent) { "Green" } else { "Gray" }
+            Write-Host ("   [{0}] {1,-12} : {2}x{3} @ {4}% Scale (3D: {5}x{6} | {7}) - {8}{9}" -f $row.Key, $row.Name, $pInfo.AppliedResolutionX, $pInfo.AppliedResolutionY, $pInfo.AppliedScreenScale, $pInfo.InternalRenderX, $pInfo.InternalRenderY, $texLabel, $row.Tag, $marker) -ForegroundColor $color
+        }
+        Write-Host "-------------------------------------------------------------------------" -ForegroundColor DarkCyan
+        Write-Host "  -> Bam phim [1]..[5] : Doi ngay che do trong GameUserSettings.ini (khong can chinh trong game)" -ForegroundColor Cyan
+        Write-Host "  -> Bam phim [R]      : Tu dong mo / khoi dong lai PUBG de nap ngay che do moi" -ForegroundColor Cyan
+        Write-Host "  -> Bam phim [Q]/[Esc]: Thoat Session Guard & Tu dong khoi phuc Power Scheme + INI goc" -ForegroundColor Yellow
+    }
+
     function Wait-PubgSessionAndRestore {
+        $script:activePreset = $iniResult.AppliedPreset
+        $keepGuardForPresetReload = $false
         Write-Host "`n[SESSION GUARD] Dang giam sat TslGame.exe & UnrealCEFSubProcess_3071..." -ForegroundColor Cyan
-        Write-Host "  -> Bam phim [1]..[5] ngay tai cua so nay de doi nhanh che do do phan giai truoc khi mo game!" -ForegroundColor Green
-        Write-Host "  -> Hay mo game PUBG! Khi thoat PUBG (hoac nhan Enter / Esc / Q), Power Scheme & CPU Affinity se tu dong khoi phuc!" -ForegroundColor Yellow
         $timerLocked = $false
         try {
             $selfProc = $null
@@ -285,26 +335,15 @@ try {
             } catch {} finally {
                 if ($null -ne $selfProc) { $selfProc.Dispose() }
             }
+            Show-IrisXeSessionPresetMenu -ActivePreset $script:activePreset -BandwidthGBs $hw.PeakBandwidthGBs
+            try { while (-not [Console]::IsInputRedirected -and [Console]::KeyAvailable) { [void][Console]::ReadKey($true) } } catch {}
             $gameSeen = $false
-            while ($true) {
-                if ([Console]::KeyAvailable) {
-                    $k = [Console]::ReadKey($true)
-                    if ($k.Key -eq [ConsoleKey]::Enter -or $k.Key -eq [ConsoleKey]::Escape -or $k.Key -eq [ConsoleKey]::Q) { break }
-                    if ($k.KeyChar -in @('1','2','3','4','5')) {
-                        $hotPreset = switch ($k.KeyChar) {
-                            '1' { 'NativeCrisp' }
-                            '2' { 'HighClarity' }
-                            '3' { 'BalancedPlus' }
-                            '4' { 'PerfSharp' }
-                            '5' { 'UltraPerf' }
-                        }
-                        $hotIni = Optimize-PubgIniFiles -TargetConfigDir $ConfigDir -TargetGraphicsAPI $GraphicsAPI -TargetFpsCap $InGameFpsCap -TurnOffHrtf $DisableHrtf.IsPresent -QualityPreset $hotPreset -PeakBandwidthGBs $hw.PeakBandwidthGBs -IsDryRun $isDry
-                        Write-Host ("  [HOT-SWITCH] Da doi sang [{0}] {1} -> {2}x{3} @ {4}% Scale (3D: {5}x{6} | Tex={7})! (Neu dang trong tran, chinh truc tiep trong Esc -> Do hoa)" -f $k.KeyChar, $hotIni.AppliedPreset, $hotIni.TargetResX, $hotIni.TargetResY, $hotIni.TargetScale, $hotIni.Render3DX, $hotIni.Render3DY, $hotIni.TextureQuality) -ForegroundColor Green
-                    }
-                }
+            $shouldExitGuard = $false
+            while (-not $shouldExitGuard) {
                 $tsl = @([System.Diagnostics.Process]::GetProcessesByName("TslGame"))
+                $isGameRunning = ($tsl.Count -gt 0)
                 foreach ($tp in $tsl) { $tp.Dispose() }
-                if ($tsl.Count -gt 0) {
+                if ($isGameRunning) {
                     $gameSeen = $true
                     $prevPinCount = if ($null -ne $script:pinnedProcs) { @($script:pinnedProcs).Count } else { 0 }
                     $script:pinnedProcs = Set-BackgroundProcessesToECores -PinMask $topo.BackgroundPinMask -ExistingRecords $script:pinnedProcs -IsDryRun $false
@@ -323,9 +362,100 @@ try {
                         Write-BoostStateAtomically -StateFilePath $StateFile -StateObject $loopStateObj -IsDryRun $false
                     }
                 } elseif ($gameSeen) {
-                    break
+                    if ($keepGuardForPresetReload) {
+                        Start-Sleep -Milliseconds 500
+                        $reIni = Optimize-PubgIniFiles -TargetConfigDir $ConfigDir -TargetGraphicsAPI $GraphicsAPI -TargetFpsCap $InGameFpsCap -TurnOffHrtf $DisableHrtf.IsPresent -QualityPreset $script:activePreset -PeakBandwidthGBs $hw.PeakBandwidthGBs -IsDryRun $isDry
+                        $gameSeen = $false
+                        $keepGuardForPresetReload = $false
+                        Write-Host ("`n  [+] PUBG da dong -> Da ghi khoa che do [{0}] ({1}x{2} @ {3}% Scale) vao GameUserSettings.ini! Hay mo lai PUBG (hoac bam [R] de mo game, bam [Q] de thoat)." -f $reIni.AppliedPreset, $reIni.AppliedResolutionX, $reIni.AppliedResolutionY, $reIni.AppliedScreenScale) -ForegroundColor Green
+                    } else {
+                        break
+                    }
                 }
-                Start-Sleep -Seconds 3
+                $redirectedActive = [Console]::IsInputRedirected -and ($hasPipedInput -or ([Console]::In.GetType().Name -match 'StringReader') -or [PubgIrisXeNative]::HasRedirectedStdinData())
+                for ($waitTick = 0; $waitTick -lt 30; $waitTick++) {
+                    $k = $null
+                    if (-not [Console]::IsInputRedirected) {
+                        if ([Console]::KeyAvailable) {
+                            $k = [Console]::ReadKey($true)
+                        }
+                    } elseif ($redirectedActive -and [Console]::In.Peek() -ge 0) {
+                        $lineIn = [Console]::In.ReadLine()
+                        $trimIn = if ($null -ne $lineIn) { $lineIn.Trim() } else { "Q" }
+                        if ($trimIn -eq "") {
+                            $k = New-Object System.ConsoleKeyInfo([char]13, [System.ConsoleKey]::Enter, $false, $false, $false)
+                        } elseif ($trimIn -in @('1','2','3','4','5')) {
+                            $ch = [char]$trimIn[0]
+                            $k = New-Object System.ConsoleKeyInfo($ch, ([System.ConsoleKey]"D$ch"), $false, $false, $false)
+                        } elseif ($trimIn -ieq 'R') {
+                            $k = New-Object System.ConsoleKeyInfo([char]'r', [System.ConsoleKey]::R, $false, $false, $false)
+                        } elseif ($trimIn -ieq 'Q' -or $trimIn -ieq 'Esc' -or $trimIn -ieq 'Escape') {
+                            $k = New-Object System.ConsoleKeyInfo([char]'q', [System.ConsoleKey]::Q, $false, $false, $false)
+                        }
+                    } elseif ([Console]::IsInputRedirected -and -not $isGameRunning) {
+                        $shouldExitGuard = $true
+                        break
+                    }
+                    if ($null -ne $k) {
+                        if ($k.Key -eq [ConsoleKey]::Escape -or $k.Key -eq [ConsoleKey]::Q) {
+                            $shouldExitGuard = $true
+                            break
+                        }
+                        if ($k.Key -eq [ConsoleKey]::Enter) {
+                            Show-IrisXeSessionPresetMenu -ActivePreset $script:activePreset -BandwidthGBs $hw.PeakBandwidthGBs
+                            continue
+                        }
+                        if ($k.KeyChar -in @('1','2','3','4','5')) {
+                            $hotPreset = switch ($k.KeyChar) {
+                                '1' { 'NativeCrisp' }
+                                '2' { 'HighClarity' }
+                                '3' { 'BalancedPlus' }
+                                '4' { 'PerfSharp' }
+                                '5' { 'UltraPerf' }
+                            }
+                            $hotIni = Optimize-PubgIniFiles -TargetConfigDir $ConfigDir -TargetGraphicsAPI $GraphicsAPI -TargetFpsCap $InGameFpsCap -TurnOffHrtf $DisableHrtf.IsPresent -QualityPreset $hotPreset -PeakBandwidthGBs $hw.PeakBandwidthGBs -IsDryRun $isDry
+                            $script:activePreset = $hotIni.AppliedPreset
+                            Show-IrisXeSessionPresetMenu -ActivePreset $script:activePreset -BandwidthGBs $hw.PeakBandwidthGBs
+                            $tslNow = @([System.Diagnostics.Process]::GetProcessesByName("TslGame"))
+                            $runningNow = ($tslNow.Count -gt 0)
+                            foreach ($tpNow in $tslNow) { $tpNow.Dispose() }
+                            if ($runningNow) {
+                                $keepGuardForPresetReload = $true
+                                Write-Host ("  [HOT-SWITCH] Da chon [{0}] {1} -> {2}x{3} @ {4}% Scale (3D: {5}x{6} | Tex={7})!" -f $k.KeyChar, $hotIni.AppliedPreset, $hotIni.AppliedResolutionX, $hotIni.AppliedResolutionY, $hotIni.AppliedScreenScale, $hotIni.InternalRenderX, $hotIni.InternalRenderY, $hotIni.AppliedTextureQuality) -ForegroundColor Green
+                                Write-Host ("  [!] Vi PUBG dang chay, bam phim [R] ngay tai day de tu dong khoi dong lai PUBG nap che do [{0}] (hoac tu dong/mo lai game, cua so nay se giu nguyen va tu ghi khoa cau hinh moi khi game dong)!" -f $k.KeyChar) -ForegroundColor Yellow
+                            } else {
+                                Write-Host ("  [HOT-SWITCH] Da ap dung ngay [{0}] {1} -> {2}x{3} @ {4}% Scale (3D: {5}x{6} | Tex={7}) vao GameUserSettings.ini! Mo PUBG (hoac bam [R]) de vao game." -f $k.KeyChar, $hotIni.AppliedPreset, $hotIni.AppliedResolutionX, $hotIni.AppliedResolutionY, $hotIni.AppliedScreenScale, $hotIni.InternalRenderX, $hotIni.InternalRenderY, $hotIni.AppliedTextureQuality) -ForegroundColor Green
+                            }
+                            break
+                        } elseif ($k.Key -eq [ConsoleKey]::R) {
+                            $tslRestart = @([System.Diagnostics.Process]::GetProcessesByName("TslGame"))
+                            $wasRunning = ($tslRestart.Count -gt 0)
+                            foreach ($tpR in $tslRestart) { $tpR.Dispose() }
+                            if ($wasRunning) {
+                                $keepGuardForPresetReload = $true
+                                Write-Host ("`n  [RESTART PUBG] Dang dong TslGame.exe de nap che do [{0}]..." -f $script:activePreset) -ForegroundColor Yellow
+                                Stop-Process -Name "TslGame" -Force -ErrorAction SilentlyContinue
+                                for ($w = 0; $w -lt 25; $w++) {
+                                    Start-Sleep -Milliseconds 400
+                                    $chk = @([System.Diagnostics.Process]::GetProcessesByName("TslGame"))
+                                    $cnt = $chk.Count
+                                    foreach ($c in $chk) { $c.Dispose() }
+                                    if ($cnt -eq 0) { break }
+                                }
+                                Start-Sleep -Milliseconds 500
+                            }
+                            $reApply = Optimize-PubgIniFiles -TargetConfigDir $ConfigDir -TargetGraphicsAPI $GraphicsAPI -TargetFpsCap $InGameFpsCap -TurnOffHrtf $DisableHrtf.IsPresent -QualityPreset $script:activePreset -PeakBandwidthGBs $hw.PeakBandwidthGBs -IsDryRun $isDry
+                            $gameSeen = $false
+                            $keepGuardForPresetReload = $false
+                            Write-Host ("  [LAUNCH PUBG] Da ghi khoa [{0}] ({1}x{2} @ {3}% Scale | 3D: {4}x{5}) -> Dang mo PUBG qua Steam..." -f $reApply.AppliedPreset, $reApply.AppliedResolutionX, $reApply.AppliedResolutionY, $reApply.AppliedScreenScale, $reApply.InternalRenderX, $reApply.InternalRenderY) -ForegroundColor Green
+                            if (-not $isDry -and $env:PUBG_SKIP_STEAM_LAUNCH -ne "1") {
+                                try { Start-Process "steam://rungameid/578080" } catch {}
+                            }
+                            break
+                        }
+                    }
+                    Start-Sleep -Milliseconds 100
+                }
             }
         } finally {
             if ($timerLocked) {

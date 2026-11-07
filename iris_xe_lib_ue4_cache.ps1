@@ -180,6 +180,13 @@ function Resolve-PubgQualityPreset {
         AppliedTextureQuality      = $texQ
         AppliedAntiAliasingQuality = $aaQ
         ScalingMode                = $scalingMode
+        TargetResX                 = $resX
+        TargetResY                 = $resY
+        TargetScale                = $clampedScale
+        Render3DX                  = $internalX
+        Render3DY                  = $internalY
+        TextureQuality             = $texQ
+        AntiAliasingQuality        = $aaQ
     }
 }
 Set-Alias -Name Resolve-IrisXeQualityPreset -Value Resolve-PubgQualityPreset -Scope Global -ErrorAction SilentlyContinue
@@ -274,6 +281,9 @@ function Optimize-PubgIniFiles {
                     EngineUpdated = $false; GusUpdated = $false; AppliedPreset = $resolved.AppliedPreset; AppliedResolutionX = $effectiveResX; AppliedResolutionY = $effectiveResY
                     AppliedScreenScale = $clampedScale; InternalRenderX = [int][math]::Round(($effectiveResX * $clampedScale) / 100.0); InternalRenderY = [int][math]::Round(($effectiveResY * $clampedScale) / 100.0)
                     AppliedTextureQuality = $texQualityVal; AppliedAntiAliasingQuality = $aaQualityVal; ScalingMode = $resolved.ScalingMode
+                    TargetResX = $effectiveResX; TargetResY = $effectiveResY; TargetScale = $clampedScale
+                    Render3DX = [int][math]::Round(($effectiveResX * $clampedScale) / 100.0); Render3DY = [int][math]::Round(($effectiveResY * $clampedScale) / 100.0)
+                    TextureQuality = $texQualityVal; AntiAliasingQuality = $aaQualityVal
                 }
             }
 
@@ -413,6 +423,9 @@ function Optimize-PubgIniFiles {
         EngineUpdated = $engineUpdated; GusUpdated = $gusUpdated; AppliedPreset = $resolved.AppliedPreset; AppliedResolutionX = $effectiveResX; AppliedResolutionY = $effectiveResY
         AppliedScreenScale = $clampedScale; InternalRenderX = [int][math]::Round(($effectiveResX * $clampedScale) / 100.0); InternalRenderY = [int][math]::Round(($effectiveResY * $clampedScale) / 100.0)
         AppliedTextureQuality = $texQualityVal; AppliedAntiAliasingQuality = $aaQualityVal; ScalingMode = $resolved.ScalingMode
+        TargetResX = $effectiveResX; TargetResY = $effectiveResY; TargetScale = $clampedScale
+        Render3DX = [int][math]::Round(($effectiveResX * $clampedScale) / 100.0); Render3DY = [int][math]::Round(($effectiveResY * $clampedScale) / 100.0)
+        TextureQuality = $texQualityVal; AntiAliasingQuality = $aaQualityVal
     }
 }
 

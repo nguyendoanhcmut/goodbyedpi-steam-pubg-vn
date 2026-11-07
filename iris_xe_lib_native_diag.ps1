@@ -77,6 +77,8 @@ public static class PubgIrisXeNative {
     [DllImport("powrprof.dll")] public static extern uint PowerWriteDCValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint DcValueIndex);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetLogicalProcessorInformationEx(int RelationshipType, IntPtr Buffer, ref uint ReturnedLength);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint GetFileType(IntPtr hFile);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool PeekNamedPipe(IntPtr hNamedPipe, IntPtr lpBuffer, uint nBufferSize, IntPtr lpBytesRead, out uint lpTotalBytesAvail, IntPtr lpBytesLeftThisMessage);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
     [DllImport("user32.dll", CharSet = CharSet.Ansi)] private static extern bool EnumDisplaySettingsA(string lpszDeviceName, int iModeNum, ref DEVMODEA lpDevMode);
@@ -88,6 +90,17 @@ public static class PubgIrisXeNative {
         if (!GetConsoleMode(hIn, out mode)) return false;
         uint newMode = (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
         return SetConsoleMode(hIn, newMode);
+    }
+
+    public static bool HasRedirectedStdinData() {
+        IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);
+        if (hIn == IntPtr.Zero || hIn == new IntPtr(-1)) return false;
+        uint ft = GetFileType(hIn);
+        if (ft == 3) {
+            uint avail = 0;
+            return PeekNamedPipe(hIn, IntPtr.Zero, 0, IntPtr.Zero, out avail, IntPtr.Zero) && avail > 0;
+        }
+        return ft == 1;
     }
 
     public static bool SetEcoQoSAndTimerThrottle(IntPtr hProcess, uint controlMask, uint stateMask) {

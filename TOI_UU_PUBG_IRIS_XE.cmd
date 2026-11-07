@@ -2,8 +2,11 @@
 setlocal DisableDelayedExpansion
 :: Tu dong xin quyen Administrator va chuyen tiep tham so an toan
 net session >nul 2>&1
-if %ERRORLEVEL% neq 0 goto :Elevate
+if %ERRORLEVEL% equ 0 goto :RunMain
+echo "%*" | findstr /I "\-DryRun" >nul 2>&1 && goto :RunMain
+goto :Elevate
 
+:RunMain
 title TOI UU HOA PUBG PC - DELL LATITUDE 3450 (i7-1355U + INTEL IRIS XE)
 cd /d "%~dp0"
 if "%~1"=="" (
@@ -17,10 +20,7 @@ exit /b %ERRORLEVEL%
 
 :Elevate
 if "%~1"=="" (
-    schtasks /query /tn "PUBGIrisXe-Boost" >nul 2>&1 && (
-        schtasks /run /tn "PUBGIrisXe-Boost" >nul 2>&1
-        exit /b 0
-    )
+    schtasks /query /tn "PUBGIrisXe-Boost" >nul 2>&1 && schtasks /run /tn "PUBGIrisXe-Boost" >nul 2>&1 && exit /b 0
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs -Wait"
 ) else (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs -Wait"
